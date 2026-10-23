@@ -5,6 +5,7 @@ permissions:
 jobs:
   mingw:
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - run: sudo apt-get update -qq && sudo apt-get install -y -qq mingw-w64
@@ -27,6 +28,7 @@ jobs:
           git push -f "https://x-access-token:${{ github.token }}@github.com/${GITHUB_REPOSITORY}" ci-mingw
   msvc:
     runs-on: windows-2022
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: MSVC build
@@ -35,6 +37,8 @@ jobs:
           mkdir -p out
           cmake -S . -B build -A x64 > out/msvc.log 2>&1
           cmake --build build --config Release >> out/msvc.log 2>&1; echo "status=$?" >> out/msvc.log
+          mkdir -p out/dist && cp -r build/Release/LunarTweaks.exe build/Release/OPEN-LUNARTWEAKS.exe build/Release/assets build/Release/LunarTweaks.ini build/Release/START-HERE.txt build/Release/THIRD-PARTY-NOTICES.txt out/dist/ || true
+          dumpbin //dependents build/Release/LunarTweaks.exe >> out/msvc.log 2>&1 || true
       - name: Publish result branch
         if: always()
         shell: bash

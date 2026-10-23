@@ -3,6 +3,8 @@ project(LunarTweaks VERSION 2.0.0 LANGUAGES CXX RC)
 if(NOT WIN32)
   message(FATAL_ERROR "Target Windows x64, or use build-mingw.sh with a cross compiler")
 endif()
+# Static C++ runtime: the exe runs without the Visual C++ Redistributable.
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 add_executable(LunarTweaks WIN32 app/main.cpp app/catalog.cpp app/resources.rc)
