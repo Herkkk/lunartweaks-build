@@ -16,6 +16,7 @@ jobs:
           mkdir -p out
           ( g++ -std=c++20 -Wall -Wextra -Werror tests/reg_tweaks_test.cpp -o reg_test && ./reg_test &&
             g++ -std=c++20 -Wall -Wextra -Werror tests/adaptive_power_test.cpp -o power_test && ./power_test &&
+            g++ -std=c++20 -Wall -Wextra -Werror tests/ui_audio_test.cpp -o audio_test && ./audio_test &&
             CXX=x86_64-w64-mingw32-g++-posix WINDRES=x86_64-w64-mingw32-windres bash build-mingw.sh ) 2>&1 | tee out/mingw.log
           echo "status=$?" >> out/mingw.log
       - name: Publish result branch

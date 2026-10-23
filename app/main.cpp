@@ -1,4 +1,4 @@
-#include "license.hpp"
+#include "polar_license.hpp"
 #include "entitlements.hpp"
 #include "tweaks.hpp"
 #include "network_probe.hpp"
@@ -31,7 +31,7 @@ ULONGLONG uiNow(){return std::chrono::duration_cast<std::chrono::milliseconds>(s
 constexpr int ID_KEY = 101;
 HWND window = nullptr, keyEdit = nullptr;
 ULONG_PTR gdip = 0;
-std::unique_ptr<LicenseClient> license;
+std::unique_ptr<Licensing> license;
 std::unique_ptr<Bitmap> brandLogo, violetLight, blueLight;
 std::thread worker;
 std::atomic_bool busy = false;
@@ -130,6 +130,20 @@ void updateListHits();
 void prepareListCache();
 void drawScrollingList(Graphics &g);
 int maxScrollRow();
+// <<<STATE-BEGIN>>>
+ULONGLONG introStart = 0, detailSwitch = 0, navStart = 0, ringStart = 0, toastStart = 0, recentStart = 0;
+float navFrom = -1, navTo = -1, ringFrom = 0, ringTo = 0;
+int recentId = -1, toastKind = 0;
+std::wstring toastText;
+struct Modal {
+    bool open = false;
+    std::wstring title, body, primary, secondary;
+    int tone = 0, icon = 0; // tone: 0 accent, 1 success, 2 error, 3 warning
+    std::function<void()> action;
+    ULONGLONG start = 0;
+};
+Modal modal;
+// <<<STATE-END>>>
 bool sampling = false, groupedCpu = false;
 ULONGLONG transitionStart = 0, lastSampleTick = 0;
 float hoverAmount = 0;
@@ -176,12 +190,21 @@ struct Surface {
 };
 Surface sceneSurface, frameSurface, transitionSurface, listSurface, ambientSurface, detailSurface;
 void beginTransition() {
+    // Every page enters with a staggered fade-up, like the website's sections.
     animatedHover = -1;
     hoverAmount = 0;
-    if (reduceMotion || movingWindow || !frameSurface.dc) return;
-    transitionSurface.ensure(frameSurface.width, frameSurface.height);
-    BitBlt(transitionSurface.dc, 0, 0, frameSurface.width, frameSurface.height, frameSurface.dc, 0, 0, SRCCOPY);
-    transitionStart = uiNow();
+    transitionStart = 0;
+    introStart = reduceMotion ? 0 : uiNow();
+}
+bool sceneAnimating() {
+    auto now = uiNow();
+    return (introStart && now - introStart < 1400) || (navStart && now - navStart < 280) ||
+           (ringStart && now - ringStart < 920) || (modal.open && now - modal.start < 240);
+}
+bool frameAnimating() {
+    auto now = uiNow();
+    return (toastStart && now - toastStart < 3900) || (detailSwitch && now - detailSwitch < 240) ||
+           (recentStart && now - recentStart < 1100);
 }
 void sampleActivity() {
     ULONGLONG now = uiNow();
@@ -201,8 +224,9 @@ void refresh(HWND hwnd) { sceneDirty = true; InvalidateRect(hwnd, nullptr, FALSE
 void animationTimer(HWND hwnd) {
     bool visible = !movingWindow && !IsIconic(hwnd) && appActive;
     if (!visible || reduceMotion) {listScroll.target=std::clamp(std::round(listScroll.target/ROW_H)*ROW_H,0.0f,listScroll.limit);listScroll.settle();scrollInput=0;detailScroll.settle();hoverStart=0;hoverAmount=1;}
-    bool motionNeeded = busy || transitionStart || listScroll.moving() || detailScroll.moving() || hoverStart || scrollInput;
-    int interval=(!visible||reduceMotion)?(busy&&visible?50:0):motionNeeded?8:50;
+    bool sceneMotion = !reduceMotion && sceneAnimating();
+    bool motionNeeded = busy || transitionStart || listScroll.moving() || detailScroll.moving() || hoverStart || scrollInput || sceneMotion || frameAnimating();
+    int interval=(!visible||reduceMotion)?((busy||frameAnimating())&&visible?50:0):sceneMotion?14:motionNeeded?8:50;
     if(frameClock.running())frameClock.interval(interval);
     else if(interval)SetTimer(hwnd,1,interval,nullptr);
     else KillTimer(hwnd,1);
@@ -274,6 +298,8 @@ Color tile(255,30,26,47), elevated(255,32,28,48), divider(255,35,31,52);
 Color white(255,244,242,250), muted(255,166,160,187), dim(255,118,112,140);
 Color purple(255,192,160,255), lavender(255,183,148,246), accent(255,124,58,237), accent2(255,159,103,255);
 Color green(255,122,214,160), amber(255,240,190,110), red(255,236,124,136);
+float gAlpha = 1;
+Color fade(Color c){return gAlpha>=.999f?c:Color(BYTE(c.GetA()*std::clamp(gAlpha,0.0f,1.0f)),BYTE(c.GetR()),BYTE(c.GetG()),BYTE(c.GetB()));}
 Color mix(Color a,Color b,float t){t=std::clamp(t,0.0f,1.0f);return Color(255,BYTE(a.GetR()+(b.GetR()-a.GetR())*t),BYTE(a.GetG()+(b.GetG()-a.GetG())*t),BYTE(a.GetB()+(b.GetB()-a.GetB())*t));}
 
 // <<<PRIM-BEGIN>>>  Drawing primitives (replaced by a recorder in the portable preview harness)
@@ -283,19 +309,20 @@ void roundedPath(GraphicsPath &p,float x,float y,float w,float h,float radius){
 }
 void rect(Graphics &g, float x, float y, float w, float h, Color c, float radius = 10) {
     if(w<=0||h<=0)return;
-    GraphicsPath p;roundedPath(p,x,y,w,h,radius);SolidBrush b(c);g.FillPath(&b,&p);
+    GraphicsPath p;roundedPath(p,x,y,w,h,radius);SolidBrush b(fade(c));g.FillPath(&b,&p);
 }
 void gradientRect(Graphics &g,float x,float y,float w,float h,Color a,Color b,float radius=10){
     if(w<=0||h<=0)return;
-    GraphicsPath p;roundedPath(p,x,y,w,h,radius);LinearGradientBrush brush(PointF(x-1,y),PointF(x+w+1,y),a,b);g.FillPath(&brush,&p);
+    GraphicsPath p;roundedPath(p,x,y,w,h,radius);LinearGradientBrush brush(PointF(x-1,y),PointF(x+w+1,y),fade(a),fade(b));g.FillPath(&brush,&p);
 }
 void outlineRect(Graphics &g,float x,float y,float w,float h,Color color,float weight=1,float radius=10){
-    GraphicsPath p;roundedPath(p,x,y,w,h,radius);Pen pen(color,weight);g.DrawPath(&pen,&p);
+    GraphicsPath p;roundedPath(p,x,y,w,h,radius);Pen pen(fade(color),weight);g.DrawPath(&pen,&p);
 }
 void line(Graphics &g, float x, float y, float x2, float y2, Color c, float weight = 1) {
-    Pen p(c, weight);g.DrawLine(&p, x, y, x2, y2);
+    Pen p(fade(c), weight);g.DrawLine(&p, x, y, x2, y2);
 }
 void glow(Graphics &g,float cx,float cy,float w,float h,Color c){
+    if(gAlpha<.999f)c=fade(c);
     GraphicsPath p;p.AddEllipse(cx-w/2,cy-h/2,w,h);PathGradientBrush b(&p);b.SetCenterColor(c);
     Color edge(0,c.GetR(),c.GetG(),c.GetB());int n=1;b.SetSurroundColors(&edge,&n);g.FillPath(&b,&p);
 }
@@ -312,7 +339,7 @@ void text(Graphics &g, const std::wstring &value, float x, float y, float width,
           float size, Color c, bool bold = false, int flags = 0) {
     if(value.empty())return;
     Font *font=fontFor(size,bold,(flags&8)||size>=20);
-    SolidBrush b(c);
+    SolidBrush b(fade(c));
     StringFormat fmt;
     fmt.SetTrimming(StringTrimmingEllipsisCharacter);
     fmt.SetFormatFlags((flags&4)?StringFormatFlagsNoWrap:StringFormatFlagsNoClip);
@@ -332,6 +359,20 @@ float textHeight(Graphics &g,const std::wstring &value,float size,float width,bo
 // <<<PRIM-END>>>
 
 // <<<UI-BEGIN>>>
+// ---- Motion: website-style staggered fade-up, eased hovers, count-ups --------------------
+float progress(ULONGLONG start,float ms){if(!start||reduceMotion)return 1;return std::clamp(float(uiNow()-start)/ms,0.0f,1.0f);}
+float appear(int i){
+    if(!introStart||reduceMotion)return 1;
+    float t=(float(uiNow()-introStart)-i*55.0f)/460.0f;
+    return lt::easeOut(std::clamp(t,0.0f,1.0f));
+}
+struct Reveal{
+    Graphics &g;int state;float saved;
+    Reveal(Graphics &gr,int i,float dy=18):g(gr){float p=appear(i);saved=gAlpha;gAlpha*=p;state=(int)g.Save();g.TranslateTransform(0,(1-p)*dy);}
+    ~Reveal(){g.Restore(state);gAlpha=saved;}
+};
+float hoverEase(int me){return hover==me?(reduceMotion?1:lt::easeOut(hoverAmount)):0;}
+float ringShown(){return ringFrom+(ringTo-ringFrom)*lt::easeOut(progress(ringStart,900));}
 int stateOf(int id){return id>=0&&id<(int)states.size()?states[id]:0;}
 bool visibleTweak(const Tweak &t){return !t.legacy;}
 std::wstring tierName(int v) { return v == 2 ? L"Pro" : L"Free"; }
@@ -369,8 +410,9 @@ enum Icon { IcWindows, IcBolt, IcCpu, IcGamepad, IcDrive, IcWifi, IcGrid = 10, I
             IcSoundOn, IcSoundOff, IcMotionOn, IcMotionOff, IcFull, IcExitFull, IcSpark, IcClock, IcKey, IcArrow };
 void icon(Graphics &g,int which,float x,float y,Color c,float size=24){
     auto state=g.Save();g.TranslateTransform(x,y);g.ScaleTransform(size/24,size/24);
-    Pen p(c,1.8f);p.SetStartCap(LineCapRound);p.SetEndCap(LineCapRound);p.SetLineJoin(LineJoinRound);
-    SolidBrush fill(c);
+    Color fc=fade(c);
+    Pen p(fc,1.8f);p.SetStartCap(LineCapRound);p.SetEndCap(LineCapRound);p.SetLineJoin(LineJoinRound);
+    SolidBrush fill(fc);
     auto lines=[&](std::initializer_list<PointF> pts){std::vector<PointF> v(pts);g.DrawLines(&p,v.data(),(int)v.size());};
     switch(which){
     case IcWindows:for(float a:{3.0f,13.0f})for(float b:{3.0f,13.0f})outlineRect(g,a,b,8,8,c,1.8f,1.5f);break;
@@ -409,9 +451,10 @@ void icon(Graphics &g,int which,float x,float y,Color c,float size=24){
     }
     g.Restore(state);
 }
-void card2(Graphics &g,float x,float y,float w,float h,bool over=false,float radius=16){
-    rect(g,x,y,w,h,over?cardHover:card,radius);
-    outlineRect(g,x+.5f,y+.5f,w-1,h-1,over?borderHover:cardBorder,1,radius);
+void card2(Graphics &g,float x,float y,float w,float h,float hot=0,float radius=16){
+    if(hot>.01f)glow(g,x+w/2,y+h/2+8,w*1.12f,h*1.7f,Color(BYTE(54*hot),124,58,237));
+    rect(g,x,y,w,h,mix(card,cardHover,hot),radius);
+    outlineRect(g,x+.5f,y+.5f,w-1,h-1,mix(cardBorder,borderHover,hot),1,radius);
 }
 void iconTile(Graphics &g,int which,float x,float y,float s=40,Color c=lavender){
     rect(g,x,y,s,s,tile,s*.26f);
@@ -479,10 +522,11 @@ void sectionLabel(Graphics &g,const std::wstring &label,float x,float y,Color c=
 }
 void paintBackground(Graphics &g) {
     g.Clear(bgColor);
-    float dx=std::sin(ambientPhase*.17f)*28,dy=std::cos(ambientPhase*.13f)*20;
+    // Slowly drifting light, like the website hero.
+    float dx=std::sin(ambientPhase*.31f)*64,dy=std::cos(ambientPhase*.23f)*42,ex=std::cos(ambientPhase*.19f)*52;
     if(violetLight)g.DrawImage(violetLight.get(),RectF(160+dx,-560+dy,1120,1120));
-    if(violetLight)g.DrawImage(violetLight.get(),RectF(420-dx,380+dy,760,760));
-    if(blueLight)g.DrawImage(blueLight.get(),RectF(860-dx,420-dy,700,700));
+    if(violetLight)g.DrawImage(violetLight.get(),RectF(420-ex,380+dy*.6f,760,760));
+    if(blueLight)g.DrawImage(blueLight.get(),RectF(860+ex,420-dy,700,700));
 }
 void brandMark(Graphics &g, float x, float y, float size) {
     if (brandLogo) g.DrawImage(brandLogo.get(), RectF(x, y, size, size));
@@ -546,19 +590,21 @@ void planTile(Graphics &g,bool pro,float x,float y,float w,float h){
 }
 void loginPage(Graphics &g){
     glow(g,360,300,900,700,Color(70,96,40,200));
+    {Reveal r(g,0);
     brandMark(g,72,92,52);
     text(g,L"Lunar",136,92,90,52,24,white,true,4|16);
-    text(g,L"Tweaks",214,92,140,52,24,lavender,true,4|16);
-    text(g,L"Performance,",72,176,580,60,48,white,true);
-    text(g,L"made personal.",72,232,580,60,48,lavender,true);
-    text(g,L"LunarTweaks reads your CPU, GPU, memory and drive, then tunes Windows for that exact PC. Every change is saved first and can be undone.",
-         72,306,530,52,15.5f,muted);
-    featureCard(g,IcCpu,L"Hardware-aware tuning",L"Values chosen for your CPU, GPU and RAM, not copied from a forum post.",72,392,540,84);
-    featureCard(g,IcGamepad,L"Built for games",L"Scheduler, GPU, timer and network tweaks that cut stutter and latency.",72,488,540,84);
-    featureCard(g,IcUndo,L"One-click restore",L"Every change is logged. Undo one tweak or roll everything back.",72,584,540,84);
-    text(g,L"No account needed for Free · Pro keys are bound to this PC",72,700,540,22,12.5f,dim);
+    text(g,L"Tweaks",214,92,140,52,24,lavender,true,4|16);}
+    {Reveal r(g,1,24);text(g,L"Performance,",72,176,580,60,48,white,true);}
+    {Reveal r(g,2,24);text(g,L"made personal.",72,232,580,60,48,lavender,true);}
+    {Reveal r(g,3);text(g,L"LunarTweaks reads your CPU, GPU, memory and drive, then tunes Windows for that exact PC. Every change is saved first and can be undone.",
+         72,306,530,52,15.5f,muted);}
+    {Reveal r(g,4);featureCard(g,IcCpu,L"Hardware-aware tuning",L"Values chosen for your CPU, GPU and RAM, not copied from a forum post.",72,392,540,84);}
+    {Reveal r(g,5);featureCard(g,IcGamepad,L"Built for games",L"Scheduler, GPU, timer and network tweaks that cut stutter and latency.",72,488,540,84);}
+    {Reveal r(g,6);featureCard(g,IcUndo,L"One-click restore",L"Every change is logged. Undo one tweak or roll everything back.",72,584,540,84);}
+    {Reveal r(g,7);text(g,L"No account needed for Free · Pro keys are bound to this PC",72,700,540,22,12.5f,dim);}
 
     float px=664,py=80,pw=548,ph=672;
+    Reveal panel(g,2,26);
     card2(g,px,py,pw,ph,false,22);
     text(g,L"Choose your plan",px+32,py+28,400,36,26,white,true);
     text(g,L"Start free, or unlock every performance tweak with Pro.",px+32,py+66,480,22,14,muted);
@@ -581,7 +627,7 @@ void loginPage(Graphics &g){
     }
     quietButton(g,L"Local recovery",px+300,py+580,118,32,12);
     quietButton(g,L"Preview",px+424,py+580,92,32,2);
-    text(g,L"Free works offline. Pro verifies your key once, then binds it to this PC.",px+32,py+626,484,22,12,dim);
+    text(g,license&&license->polar()?L"Bought Pro? Your key is in the Polar receipt email. Free works offline.":L"Free works offline. Pro verifies your key once, then binds it to this PC.",px+32,py+626,484,22,12,dim);
 }
 
 void sidebar(Graphics &g) {
@@ -590,13 +636,19 @@ void sidebar(Graphics &g) {
     g.FillRectangle(&side, 0.0f, kHeader+1, SW, 800-kHeader-1);
     line(g,SW,kHeader+1,SW,800,divider);
     sectionLabel(g,L"WORKSPACE",24,74,dim);
+    {   // The selection pill glides between items, like the website's tab indicator.
+        float target=recovery?424.0f:selected<0?96.0f:140.0f+selected*44;
+        if(navTo!=target){float from=navTo<0?target:navFrom+(navTo-navFrom)*lt::easeOut(progress(navStart,260));navFrom=from;navTo=target;navStart=uiNow();}
+        float y=navFrom+(navTo-navFrom)*lt::easeOut(progress(navStart,260));
+        glow(g,12+NW/2,y+20,NW*1.1f,90,Color(40,124,58,237));
+        rect(g, 12, y, NW, 40, Color(255,36,26,62), 12);
+        outlineRect(g,12.5f,y+.5f,NW-1,39,Color(255,82,56,134),1,12);
+        rect(g,12,y+11,3,18,lavender,1.5f);
+    }
     auto nav = [&](const std::wstring &title, int id, float y, int ic, int action) {
         bool active = action==6 ? recovery : (!recovery && selected == id);
         bool over = (int)hits.size() == hover;
-        if (active) {
-            rect(g, 12, y, NW, 40, Color(255,36,26,62), 12);
-            outlineRect(g,12.5f,y+.5f,NW-1,39,Color(255,82,56,134),1,12);
-        } else if (over) rect(g, 12, y, NW, 40, Color(255,22,19,35), 12);
+        if (over && !active) rect(g, 12, y, NW, 40, Color(BYTE(255*hoverEase((int)hits.size())),22,19,35), 12);
         icon(g,ic,26,y+11,active?purple:over?white:muted,18);
         float textEnd=12+NW-10;
         if(id>=0&&action==3&&scanDone&&!preview){
@@ -749,7 +801,9 @@ void hardwareField(Graphics &g,const std::wstring &label,const std::wstring &val
 }
 void drawActivity(Graphics &g) {
     float value = preview ? -1 : (chartMode == 0 ? cpuUsage : memoryUsage);
+    float savedAlpha=gAlpha;gAlpha=appear(11);
     auto saved = g.Save();
+    g.TranslateTransform(0,(1-gAlpha)*18);
     g.SetClip(RectF(ACT_X+2, ACT_Y+2, ACT_W-4, ACT_H-4), CombineModeIntersect);
     rect(g,ACT_X+18,ACT_Y+38,124,50,card,4);
     text(g, value < 0 ? L"—" : std::to_wstring(int(std::lround(value))) + L"%", ACT_X+20, ACT_Y+38, 120, 36, 28, white, true);
@@ -760,7 +814,7 @@ void drawActivity(Graphics &g) {
     double now = double(uiNow()) / 1000;
     auto plot = preview ? lt::ActivityPlot{} : lt::plotHistory(activity, chartMode == 1, now);
     if (plot.hasSegment) {
-        Pen trace(lavender, 2);
+        Pen trace(fade(lavender), 2);
         trace.SetLineJoin(LineJoinRound);
         for (size_t i = 1; i < plot.count; ++i) {
             if (!plot.points[i].connected) continue;
@@ -770,6 +824,7 @@ void drawActivity(Graphics &g) {
         }
     } else text(g, preview ? L"Live data appears after activation" : L"Collecting live readings…", x, y+12, w, 22, 13, dim, false, 1|4);
     g.Restore(saved);
+    gAlpha=savedAlpha;
 }
 void activityCard(Graphics &g){
     card2(g,ACT_X,ACT_Y,ACT_W,ACT_H);
@@ -800,10 +855,17 @@ void overviewStatus(Graphics &g){
     auto c=countFor(-1);
     float cx=x+96,cy=y+95,r=58;
     glow(g,cx,cy,220,220,Color(60,124,58,237));
-    Pen track(Color(255,34,29,54),10);g.DrawEllipse(&track,cx-r,cy-r,r*2,r*2);
-    float ratio=c.total?float(c.active)/c.total:0;
-    if(ratio>0){Pen arc(lavender,10);arc.SetStartCap(LineCapRound);arc.SetEndCap(LineCapRound);g.DrawArc(&arc,cx-r,cy-r,r*2,r*2,-90.0f,std::max(4.0f,360*ratio));}
-    text(g,std::to_wstring(c.active),cx-50,cy-30,100,40,32,white,true,1);
+    Pen track(fade(Color(255,34,29,54)),10);g.DrawEllipse(&track,cx-r,cy-r,r*2,r*2);
+    float target=c.total?float(c.active)/c.total:0;
+    if(ringTo!=target){ringFrom=ringStart?ringShown():0;ringTo=target;ringStart=uiNow();}
+    float ratio=ringShown()*appear(2);
+    if(ratio>.003f){
+        Pen halo(fade(Color(70,183,148,246)),18);halo.SetStartCap(LineCapRound);halo.SetEndCap(LineCapRound);
+        g.DrawArc(&halo,cx-r,cy-r,r*2,r*2,-90.0f,std::max(4.0f,360*ratio));
+        Pen arc(fade(lavender),10);arc.SetStartCap(LineCapRound);arc.SetEndCap(LineCapRound);g.DrawArc(&arc,cx-r,cy-r,r*2,r*2,-90.0f,std::max(4.0f,360*ratio));
+    }
+    auto count=[&](int v){return std::to_wstring((int)std::lround(v*appear(2)));};
+    text(g,count(c.active),cx-50,cy-30,100,40,32,white,true,1);
     text(g,L"of "+std::to_wstring(c.total)+L" active",cx-50,cy+10,100,18,12,muted,false,1|4);
     float tx=x+190;
     text(g,c.ready==0?L"Your PC is fully tuned":std::to_wstring(c.ready)+L" tweaks ready for this PC",tx,y+26,390,30,21,white,true);
@@ -811,7 +873,7 @@ void overviewStatus(Graphics &g){
     if(!lastScan.empty())text(g,L"Last scan "+lastScan,tx,y+80,390,20,12,dim,false,4);
     auto stat=[&](float sx,const std::wstring &label,int value,Color c2){
         rect(g,sx,y+112,124,56,tile,12);
-        text(g,std::to_wstring(value),sx+14,y+116,100,30,22,c2,true);
+        text(g,count(value),sx+14,y+116,100,30,22,c2,true);
         text(g,label,sx+14,y+146,104,18,11.5f,muted,true,4);
     };
     stat(tx,L"READY",c.ready,purple);
@@ -821,8 +883,8 @@ void overviewStatus(Graphics &g){
 }
 void hardwareCard(Graphics &g){
     float x=880,y=150,w=368,h=190;
-    bool over=(int)hits.size()==hover;
-    card2(g,x,y,w,h,over,18);
+    int me=(int)hits.size();bool over=me==hover;
+    card2(g,x,y,w,h,hoverEase(me),18);
     text(g,L"Your hardware",x+20,y+16,220,24,16,white,true,8);
     text(g,L"Details",x+w-90,y+16,70,22,12.5f,over?white:purple,true,2|4);
     hits.push_back({RectF(x,y,w,h),17,-1});
@@ -834,13 +896,15 @@ void hardwareCard(Graphics &g){
                      x+20,y+164,w-40,18,11.5f,dim,false,4);
 }
 void areaCards(Graphics &g){
+    {Reveal r(g,4);
     text(g,L"Optimization areas",kLeft,356,500,28,20,white,true);
-    text(g,std::to_wstring(categoryCount)+L" areas · "+std::to_wstring(proTotal()+freeTotal())+L" tweaks",kRight-260,362,260,20,12.5f,dim,false,2|4);
+    text(g,std::to_wstring(categoryCount)+L" areas · "+std::to_wstring(proTotal()+freeTotal())+L" tweaks",kRight-260,362,260,20,12.5f,dim,false,2|4);}
     for(int i=0;i<categoryCount;i++){
         float w=316,h=116,x=kLeft+(i%3)*(w+18),y=392+(i/3)*(h+14);
-        int me=(int)hits.size();float up=lift(me);
+        int me=(int)hits.size();float up=lift(me)*1.5f;
+        Reveal rv(g,5+i);
         auto st=g.Save();g.TranslateTransform(0,-up);
-        card2(g,x,y,w,h,hover==me);
+        card2(g,x,y,w,h,hoverEase(me));
         iconTile(g,i,x+18,y+18,42);
         text(g,categories[i],x+74,y+18,w-90,22,16,white,true,4|8);
         auto c=countFor(i);
@@ -878,17 +942,18 @@ void proCard(Graphics &g){
 }
 void workspace(Graphics &g) {
     if (selected < 0) {
-        pageTitle(g,L"Overview",L"Tuned for your hardware. Every change can be undone.");
+        {Reveal r(g,0);pageTitle(g,L"Overview",L"Tuned for your hardware. Every change can be undone.");}
         auto c=countFor(-1);
         if(scanDone&&!preview){
+            Reveal r(g,1);
             button(g,L"Scan again",kRight-352,74,140,40,4,-1,0,false,IcClock);
             button(g,c.recommended?L"Apply recommended ("+std::to_wstring(c.recommended)+L")":L"All recommended applied",kRight-200,74,200,40,13,-1,1,c.recommended==0,IcBolt);
         }
-        overviewStatus(g);
-        hardwareCard(g);
+        {Reveal r(g,2);overviewStatus(g);}
+        {Reveal r(g,3);hardwareCard(g);}
         areaCards(g);
-        activityCard(g);
-        proCard(g);
+        {Reveal r(g,11);activityCard(g);}
+        {Reveal r(g,12);proCard(g);}
         return;
     }
     shownIds.clear();
@@ -899,23 +964,25 @@ void workspace(Graphics &g) {
             if((pass==0)==first)shownIds.push_back(t.id);
         }
     pageItemCount=(int)shownIds.size();
-    pageTitle(g,categories[selected],categoryDescriptions[selected]);
+    {Reveal r(g,0);pageTitle(g,categories[selected],categoryDescriptions[selected]);}
     auto c=countFor(selected);
+    {Reveal buttonsReveal(g,1);
     if(scanDone&&!preview){
         if(tier()<2&&c.lockedMatched>0)button(g,L"Unlock "+std::to_wstring(c.lockedMatched)+L" Pro",kRight-412,74,196,40,41,-1,2,false,IcLock);
         else if(selected==5&&!baselineReport.empty())button(g,L"Network report",kRight-372,74,156,40,15);
         button(g,c.recommended?L"Apply "+std::to_wstring(c.recommended)+L" recommended":L"All applied",kRight-200,74,200,40,42,selected,1,c.recommended==0,IcBolt);
     }else if(!preview)button(g,L"Scan this PC",kRight-180,74,180,40,4,-1,1,false,IcBolt);
+    }
     listVisible = true;
     listScroll.configure(pageItemCount*ROW_H, ROWS_H);
     if (std::find(shownIds.begin(),shownIds.end(),inspectedTweak)==shownIds.end()&&!shownIds.empty())
         inspectedTweak = shownIds.front();
-    card2(g, LIST_X, LIST_Y, LIST_W, LIST_H, false, 18);
+    {Reveal r(g,2);card2(g, LIST_X, LIST_Y, LIST_W, LIST_H, false, 18);}
     listHitStart = (int)hits.size();
     for (int i = 0; i < pageItemCount; ++i) hits.push_back({RectF(-1, -1, 0, 0), -1, -1});
     updateListHits();
     hits.push_back({RectF(SB_X-4, ROWS_Y, 16, ROWS_H), 24, -1});
-    if(auto t=findTweak(inspectedTweak))controlDetail(g, *t);
+    if(auto t=findTweak(inspectedTweak)){Reveal r(g,3);controlDetail(g, *t);}
 }
 void recoveryCard(Graphics &g,const Tweak &t,float x,float y){
     float w=484,h=112;
@@ -929,6 +996,7 @@ void recoveryCard(Graphics &g,const Tweak &t,float x,float y){
 void recoveryPage(Graphics &g){
     std::vector<const Tweak*>items;if(!preview)for(const auto&t:catalog())if(automatic(t)&&hasBackup(t))items.push_back(&t);
     pageItemCount=(int)items.size();scrollRow=std::clamp(scrollRow,0,maxScrollRow());
+    Reveal titleReveal(g,0);
     pageTitle(g,L"Undo & backups",items.empty()?L"Nothing to restore yet. Originals are saved here automatically before every change.":
               std::to_wstring(items.size())+L" original values saved. Restoring never needs a license or internet.");
     if(items.empty()){
@@ -943,8 +1011,8 @@ void recoveryPage(Graphics &g){
     }
     button(g,L"Restore everything",kRight-200,74,200,40,43,-1,1,preview,IcUndo);
     int first=scrollRow*kRecoveryPerPage;
-    for(int i=0;i<kRecoveryPerPage&&first+i<(int)items.size();++i)
-        recoveryCard(g,*items[first+i],kLeft+(i%2)*500.0f,160+(i/2)*128.0f);
+    for(int i=0;i<kRecoveryPerPage&&first+i<(int)items.size();++i){
+        Reveal r(g,1+i);recoveryCard(g,*items[first+i],kLeft+(i%2)*500.0f,160+(i/2)*128.0f);}
     if(pageItemCount>kRecoveryPerPage){
         text(g,L"Page "+std::to_wstring(scrollRow+1)+L" of "+std::to_wstring(maxScrollRow()+1),kLeft,720,300,24,13,muted,false,4|16);
         button(g,L"Previous",kRight-296,714,140,38,20,-1,0,scrollRow==0);
@@ -987,6 +1055,53 @@ void spinner(Graphics &g){
     Pen arc(lavender,4);arc.SetStartCap(LineCapRound);arc.SetEndCap(LineCapRound);
     float phase=reduceMotion?0:std::fmod(tick*300.0f,360.0f);
     g.DrawArc(&arc,cx-22,cy-22,44.0f,44.0f,phase-90,100.0f);
+}
+Color toneColor(int tone){return tone==1?green:tone==2?red:tone==3?amber:purple;}
+// In-app dialog, styled like the website cards. Replaces native message boxes.
+void drawModal(Graphics &g){
+    if(!modal.open)return;
+    float p=lt::easeOut(progress(modal.start,220));
+    SolidBrush shade(Color(BYTE(205*p),5,4,10));g.FillRectangle(&shade,0.0f,0.0f,1280.0f,800.0f);
+    hits.clear();
+    float w=560,bodyW=w-64;
+    float bodyH=std::min(400.0f,textHeight(g,modal.body,14,bodyW)+6);
+    float h=32+52+18+bodyH+32+44+28;
+    float x=(1280-w)/2,y=(800-h)/2+(1-p)*18;
+    float saved=gAlpha;gAlpha=p;
+    glow(g,640,y+h/2,w*1.5f,h*1.6f,Color(70,124,58,237));
+    card2(g,x,y,w,h,0,22);
+    Color tc=toneColor(modal.tone);
+    rect(g,x+32,y+32,52,52,Color(255,BYTE(tc.GetR()/5+20),BYTE(tc.GetG()/5+16),BYTE(tc.GetB()/5+30)),16);
+    icon(g,modal.icon,x+46,y+46,tc,24);
+    text(g,modal.title,x+100,y+32,w-132,52,21,white,true,16);
+    text(g,modal.body,x+32,y+102,bodyW,bodyH,14,Color(255,206,200,228));
+    float by=y+h-28-44,bx=x+w-32;
+    float pw=std::max(150.0f,textWidth(g,modal.primary,14,true)+56);
+    bx-=pw;button(g,modal.primary,bx,by,pw,44,50,-1,modal.tone==2&&!modal.action?0:1);
+    if(!modal.secondary.empty()){float sw=std::max(120.0f,textWidth(g,modal.secondary,14,true)+48);bx-=sw+12;button(g,modal.secondary,bx,by,sw,44,51,-1,0);}
+    gAlpha=saved;
+}
+// Small confirmation that slides in at the bottom right after an action.
+void drawToast(Graphics &g){
+    if(toastText.empty()||!toastStart)return;
+    float t=float(uiNow()-toastStart),total=3800;
+    if(t>=total)return;
+    float in=reduceMotion?1:lt::easeOut(std::clamp(t/260,0.0f,1.0f));
+    float out=t>total-360?(total-t)/360:1;
+    float a=std::min(in,out);
+    float w=std::min(560.0f,textWidth(g,toastText,13.5f,true)+92),h=50,x=(kLeft+kRight)/2-w/2,y=64-(1-in)*22;
+    float saved=gAlpha;gAlpha=a;
+    Color tc=toneColor(toastKind);
+    glow(g,x+w/2,y+h/2,w*1.2f,h*2.4f,Color(60,tc.GetR(),tc.GetG(),tc.GetB()));
+    rect(g,x,y,w,h,Color(255,22,19,36),16);
+    outlineRect(g,x+.5f,y+.5f,w-1,h-1,Color(255,BYTE(tc.GetR()/2+20),BYTE(tc.GetG()/2+16),BYTE(tc.GetB()/2+30)),1,16);
+    rect(g,x+14,y+13,28,28,Color(255,BYTE(tc.GetR()/5+20),BYTE(tc.GetG()/5+16),BYTE(tc.GetB()/5+30)),14);
+    icon(g,toastKind==2?IcShield:toastKind==3?IcShield:IcCheck,x+20,y+19,tc,16);
+    text(g,toastText,x+54,y,w-68,h,13.5f,white,true,4|16);
+    // Shrinking timer line.
+    float left=std::clamp(1-t/total,0.0f,1.0f);
+    rect(g,x+16,y+h-4,(w-32)*left,2,Color(160,tc.GetR(),tc.GetG(),tc.GetB()),1);
+    gAlpha=saved;
 }
 // <<<UI-END>>>
 
@@ -1127,7 +1242,34 @@ void positionEdit() {
     auto old = (HFONT)SendMessageW(keyEdit, WM_GETFONT, 0, 0);
     SendMessageW(keyEdit, WM_SETFONT, (WPARAM)f, TRUE);
     if (old) DeleteObject(old);
-    ShowWindow(keyEdit, logged || recovery || busy ? SW_HIDE : SW_SHOW);
+    ShowWindow(keyEdit, logged || recovery || busy || modal.open ? SW_HIDE : SW_SHOW);
+}
+void openModal(std::wstring title, std::wstring body, std::wstring primary, std::function<void()> action,
+               std::wstring secondary = L"Cancel", int tone = 0, int ic = IcBolt) {
+    modal.open = true;
+    modal.title = std::move(title); modal.body = std::move(body); modal.primary = std::move(primary);
+    modal.secondary = std::move(secondary); modal.action = std::move(action); modal.tone = tone; modal.icon = ic;
+    modal.start = uiNow();
+    keyboardFocus = hover = -1;
+    positionEdit();
+    animationTimer(window);
+    refresh(window);
+}
+void infoModal(std::wstring title, std::wstring body, int tone = 0, int ic = IcCheck) {
+    openModal(std::move(title), std::move(body), L"Got it", nullptr, L"", tone, ic);
+}
+void closeModal(bool accept) {
+    if (!modal.open) return;
+    auto action = accept ? modal.action : nullptr;
+    modal = Modal{};
+    positionEdit();
+    refresh(window);
+    if (action) action();
+}
+void toast(std::wstring text, int kind = 1) {
+    toastText = std::move(text); toastKind = kind; toastStart = uiNow();
+    animationTimer(window);
+    InvalidateRect(window, nullptr, FALSE);
 }
 void maskKey(){revealKey=false;SendMessageW(keyEdit,EM_SETPASSWORDCHAR,L'●',0);}
 void login() {
@@ -1139,22 +1281,28 @@ void login() {
         refresh(window);
         return;
     }
+    bool polar = license->polar();
     wchar_t key[200];
     GetWindowTextW(keyEdit, key, 200);
     std::wstring input = key;
     input.erase(std::remove_if(input.begin(), input.end(), [](wchar_t c) { return iswspace(c); }), input.end());
-    for (auto &c : input) c = towupper(c);
+    if (!polar) for (auto &c : input) c = towupper(c);
     if (input.empty()) {
         keyError=true;
-        notice = L"Paste your Pro license key, or continue with Free.";
+        notice = polar ? L"Paste the Pro key from your Polar receipt email, or continue with Free." : L"Paste your Pro license key, or continue with Free.";
         refresh(window);
         return;
     }
-    startWork(1, [input](Result &r) {
+    startWork(1, [input, polar](Result &r) {
         license->activate(utf8(input));
-        try { saveKey(input); } catch (...) { r.message = L"Activated; this Windows profile could not remember the key."; }
+        if (!polar) { try { saveKey(input); } catch (...) { r.message = L"Activated; this Windows profile could not remember the key."; } }
     });
     SecureZeroMemory(key, sizeof(key));
+}
+// Signs straight back in with a remembered Polar key (no typing on later launches).
+void resumeLicense() {
+    if (busy || !license || !license->polar() || !license->remembered()) return;
+    startWork(1, [](Result &) { license->resume(); });
 }
 void openWebsite(){
     ShellExecuteW(window,L"open",kWebsite,nullptr,nullptr,SW_SHOWNORMAL);
@@ -1167,8 +1315,9 @@ void relaunchElevated(){
     sei.cbSize=sizeof(sei);sei.fMask=SEE_MASK_NOCLOSEPROCESS;sei.hwnd=window;sei.lpVerb=L"runas";
     sei.lpFile=path;sei.lpParameters=args.c_str();sei.nShow=SW_SHOWNORMAL;
     if(!ShellExecuteExW(&sei)){
-        notice=GetLastError()==ERROR_CANCELLED?L"Administrator restart cancelled. Tweaks that change system settings need it.":L"Windows could not restart LunarTweaks as administrator.";
-        refresh(window);return;
+        bool cancelled=GetLastError()==ERROR_CANCELLED;
+        toast(cancelled?L"Administrator restart cancelled":L"Windows couldn't restart LunarTweaks as administrator",cancelled?3:2);
+        return;
     }
     // Keep this process alive (hidden) so a local owner license service stays available.
     ShowWindow(window,SW_HIDE);
@@ -1176,12 +1325,14 @@ void relaunchElevated(){
     std::thread([child]{if(child){WaitForSingleObject(child,INFINITE);CloseHandle(child);}PostMessageW(window,WM_CLOSE,0,0);}).detach();
 }
 std::wstring confirmText(const Tweak &t){
-    std::wstring s=std::wstring(t.summary)+L".\n\n";
-    if(t.detail&&*t.detail)s+=std::wstring(t.detail)+L"\n\n";
+    std::wstring s;
+    auto h=pc.headline.find(t.id);
+    s+=(h!=pc.headline.end()&&!h->second.empty()?h->second:std::wstring(t.summary))+L".\n\n";
     auto it=pc.tailoring.find(t.id);
-    if(it!=pc.tailoring.end())s+=L"On this PC:\n"+it->second+L"\n\n";
-    if(t.restart)s+=L"Takes full effect after a restart.\n";
-    s+=L"Your current values are saved first and can be restored from Undo & backups.\n\nApply this tweak?";
+    if(it!=pc.tailoring.end())s+=it->second+L"\n\n";
+    else if(t.detail&&*t.detail)s+=std::wstring(t.detail)+L"\n\n";
+    if(t.restart&&(it==pc.tailoring.end()||it->second.find(L"restart")==std::wstring::npos))s+=L"Takes full effect after a restart. ";
+    s+=L"Your current values are saved first, so you can undo this any time.";
     return s;
 }
 std::vector<int> batchIds(int category){
@@ -1199,10 +1350,10 @@ void applyBatch(const std::vector<int> &ids,const std::wstring &title){
     std::wstring list;bool restart=false,admin=false;int shown=0;
     for(int id:ids){auto t=findTweak(id);if(!t)continue;if(shown++<14)list+=L"•  "+std::wstring(t->name)+L"\n";restart|=t->restart;auto a=pc.admin.find(id);admin|=a!=pc.admin.end()&&a->second;}
     if(shown>14)list+=L"…and "+std::to_wstring(shown-14)+L" more\n";
-    std::wstring prompt=title+L"\n\n"+list+L"\nEvery current value is saved first and can be restored from Undo & backups.";
-    if(restart)prompt+=L"\nSome changes take full effect after a restart.";
-    if(admin&&!pc.elevated)prompt+=L"\n\nSome tweaks need administrator rights. Use \"Run as admin\" first for the full set.";
-    if(MessageBoxW(window,prompt.c_str(),L"LunarTweaks",MB_OKCANCEL|MB_ICONINFORMATION)!=IDOK)return;
+    std::wstring prompt=list+L"\nEvery current value is saved first, so you can undo any of these later.";
+    if(restart)prompt+=L" Some changes finish after a restart.";
+    if(admin&&!pc.elevated)prompt+=L"\n\nSome of these need administrator rights. Click \"Run as admin\" first to apply the full set.";
+    openModal(title,prompt,L"Apply "+std::to_wstring(shown)+L" tweak"+(shown==1?L"":L"s"),[ids]{
     SystemInfo snapshot=pc;
     startWork(7,[ids,snapshot](Result &r){
         bool pro=false;for(int id:ids)if(auto t=findTweak(id);t&&t->tier==2)pro=true;
@@ -1217,9 +1368,10 @@ void applyBatch(const std::vector<int> &ids,const std::wstring &title){
             }
         }
         r.info=systemScan();r.states=detect(r.info);
-        r.message=std::to_wstring(ok)+L" tweak"+(ok==1?L"":L"s")+L" applied and verified. Originals are saved in Undo & backups.";
-        if(!failures.empty())r.baselineReport=L"Some tweaks were skipped:\n\n"+failures;
+        r.message=std::to_wstring(ok)+L" tweak"+(ok==1?L"":L"s")+L" applied and verified";
+        if(!failures.empty())r.baselineReport=L"These were skipped:\n\n"+failures;
     });
+    },L"Cancel",0,IcBolt);
 }
 void doAction(int action, int index) {
     if (action == 99) { PostMessageW(window, WM_CLOSE, 0, 0); return; }
@@ -1236,6 +1388,8 @@ void doAction(int action, int index) {
         return;
     }
     if(action!=31&&action!=33&&action!=36)sound(lt::Cue::Click);
+    if(action==50){closeModal(true);return;}
+    if(action==51){closeModal(false);return;}
     if(action==41){openWebsite();return;}
     if(action==40){relaunchElevated();return;}
     if(action==30){maskKey();beginTransition();freeMode=true;preview=false;logged=true;recovery=false;selected=-1;scanDone=false;pc=SystemInfo{};positionEdit();scan();return;}
@@ -1248,6 +1402,7 @@ void doAction(int action, int index) {
         if(!t||!logged||recovery||t->category!=selected)return;
         listScroll.to(std::round(listScroll.position/ROW_H)*ROW_H, uiNow(), true);scrollInput=0;updateListHits();
         transitionStart = 0;
+        if(inspectedTweak!=index)detailSwitch=reduceMotion?0:uiNow();
         inspectedTweak = index;
         detailScroll.reset();detailCacheDirty=true;detailFocus=false;
         refresh(window);
@@ -1267,12 +1422,11 @@ void doAction(int action, int index) {
               L" threads\n\nGraphics\n" + pc.gpu + L"\n\nMemory\n" + std::to_wstring(pc.ram) + L" GB\n\nWindows drive\n" + pc.storage +
               L"\n\nConnection\n" + pc.network + L"\n\nSystem\n" + pc.os + (pc.laptop ? L" · laptop" : L" · desktop") +
               L"\n\nAdministrator\n" + (pc.elevated ? L"Yes" : L"No (use Run as admin for system tweaks)");
-        MessageBoxW(window, detail.c_str(), L"LunarTweaks · Your hardware", MB_OK | MB_ICONINFORMATION);
+        infoModal(L"Your hardware", detail, 0, IcCpu);
         return;
     }
     if (action == 15) {
-        MessageBoxW(window, baselineReport.empty() ? L"Scan with Pro to record a network baseline." : baselineReport.c_str(),
-                    L"LunarTweaks · Network baseline", MB_OK | MB_ICONINFORMATION);
+        infoModal(L"Network baseline", baselineReport.empty() ? L"Scan with Pro to record a network baseline." : baselineReport, 0, IcWifi);
         return;
     }
     if (action == 1) { login(); return; }
@@ -1326,7 +1480,12 @@ void doAction(int action, int index) {
         refresh(window);
         return;
     }
-    if (action == 7) {
+    if (action == 7 && license && license->polar() && tier() == 2 && !preview) {
+        openModal(L"Sign out of Pro?", L"This frees the activation for this PC, so you can use your key on another computer. Your applied tweaks stay as they are, and Undo keeps working.",
+                  L"Sign out", []{ startWork(8, [](Result &){ license->signOut(); }); }, L"Cancel", 3, IcKey);
+        return;
+    }
+    if (action == 7 || action == 70) {
         beginTransition();
         preview = false;
         freeMode=false;
@@ -1346,40 +1505,46 @@ void doAction(int action, int index) {
         auto t=*tp;
         if (preview) { notice = L"Preview mode: changes are disabled."; refresh(window); return; }
         if (tier() < t.tier) {
-            std::wstring m=std::wstring(t.name)+L" is a Pro tweak.";
-            auto it=pc.headline.find(t.id);if(it!=pc.headline.end())m+=L"\n\nOn this PC: "+it->second+L".";
-            m+=L"\n\nGet Pro at lunartweaks.se to unlock all "+std::to_wstring(proTotal())+L" performance tweaks. Open the website now?";
-            if(MessageBoxW(window,m.c_str(),L"LunarTweaks Pro",MB_YESNO|MB_ICONINFORMATION)==IDYES)openWebsite();
+            std::wstring m;
+            auto it=pc.headline.find(t.id);
+            if(it!=pc.headline.end()&&stateOf(t.id)!=3)m+=L"On this PC: "+it->second+L".\n\n";
+            int matched=countFor(-1).lockedMatched;
+            m+=L"Pro unlocks all "+std::to_wstring(proTotal())+L" performance tweaks"+(scanDone&&matched?L", and "+std::to_wstring(matched)+L" of them are already matched to your hardware":std::wstring())+
+               L". Every value is chosen for your exact CPU, GPU, RAM and drive, and every change can be undone.";
+            openModal(std::wstring(t.name)+L" is a Pro tweak",m,L"Get Pro",[]{openWebsite();},L"Not now",0,IcSpark);
             return;
         }
         if (t.kind == Kind::Ping) {
             startWork(5, [t](Result &r) { authorizeEntry(t.tier,[]{return license->authorize();}); r.message = pingTest(); });
             return;
         }
-        if (MessageBoxW(window, t.kind==Kind::Maintenance?(std::wstring(t.detail)+L"\n\nContinue?").c_str():confirmText(t).c_str(), t.name, MB_OKCANCEL | MB_ICONINFORMATION) != IDOK)
-            return;
+        auto run=[t]{
         SystemInfo snapshot=pc;
         startWork(3, [t,snapshot](Result &r) {
+            r.tweakId = t.id;
             authorizeEntry(t.tier,[]{return license->authorize();});
             if (t.kind == Kind::Maintenance) {
                 flushDns();
                 r.message = L"DNS cache cleared. It rebuilds automatically.";
             } else {
                 apply(t,snapshot);
-                r.message = std::wstring(t.name) + L" applied and verified." + (t.restart?L" Restart to finish.":L"") + L" Original saved in Undo.";
+                r.message = std::wstring(t.name) + L" applied" + (t.restart?L" · restart to finish":L"");
             }
             r.info = systemScan();
             r.states = detect(r.info);
         });
+        };
+        if(t.kind==Kind::Maintenance)openModal(L"Flush the DNS cache?",std::wstring(t.detail),L"Flush DNS",run,L"Cancel",0,IcWifi);
+        else openModal(L"Apply "+std::wstring(t.name)+L"?",confirmText(t),L"Apply tweak",run,L"Cancel",0,t.category);
         return;
     }
     if (action == 13 || action == 42) {
         if (preview) { notice = L"Changes are disabled in preview."; refresh(window); return; }
         if (!scanDone) { scan(); return; }
         auto ids=batchIds(action==42?index:-1);
-        if(ids.empty()){notice=L"Everything recommended is already active.";refresh(window);return;}
-        applyBatch(ids,action==13?(tier()==2?L"Apply every recommended tweak matched to this PC?":L"Apply every recommended Free tweak?")
-                                  :L"Apply the recommended "+std::wstring(categories[index])+L" tweaks?");
+        if(ids.empty()){toast(L"Everything recommended is already active",1);return;}
+        applyBatch(ids,action==13?(tier()==2?L"Apply everything recommended?":L"Apply the recommended Free tweaks?")
+                                  :L"Apply recommended "+std::wstring(categories[index])+L" tweaks?");
         return;
     }
     if (action == 11) {
@@ -1387,22 +1552,21 @@ void doAction(int action, int index) {
         auto tp = findTweak(index);
         if(!tp)return;
         auto t=*tp;
-        if (MessageBoxW(window, (L"Restore your original value for “" + std::wstring(t.name) +
-                                 L"”?\n\nRestoring never needs a license or internet connection.").c_str(),
-                        L"Restore original", MB_OKCANCEL | MB_ICONQUESTION) != IDOK)
-            return;
+        openModal(L"Restore "+std::wstring(t.name)+L"?",L"LunarTweaks puts back the exact value you had before. Restoring never needs a license or an internet connection.",
+                  L"Restore",[t]{
         startWork(4, [t](Result &r) {
             restore(t);
-            r.message = std::wstring(t.name) + L" restored and verified." + (t.restart?L" Restart to finish.":L"");
+            r.message = std::wstring(t.name) + L" restored" + (t.restart?L" · restart to finish":L"");
             r.info = systemScan();
             r.states = detect(r.info);
         });
+        },L"Cancel",0,IcUndo);
         return;
     }
     if (action == 43) {
         if (preview) return;
-        if (MessageBoxW(window,L"Restore every saved original value?\n\nPower plans are restored newest first. Some values take effect after a restart.",
-                        L"Restore everything",MB_OKCANCEL|MB_ICONQUESTION)!=IDOK)return;
+        openModal(L"Restore everything?",L"Every saved original value is put back. Power plans are restored newest first, and some values finish after a restart.",
+                  L"Restore everything",[]{
         startWork(4,[](Result &r){
             std::vector<const Tweak*> left;for(const auto&t:catalog())if(automatic(t)&&hasBackup(t))left.push_back(&t);
             int ok=0;std::wstring last;
@@ -1412,9 +1576,11 @@ void doAction(int action, int index) {
                 std::reverse(next.begin(),next.end());left=next;
             }
             r.info=systemScan();r.states=detect(r.info);
-            r.message=std::to_wstring(ok)+L" original values restored."+(left.empty()?std::wstring():L" "+std::to_wstring(left.size())+L" need attention: "+last);
+            r.message=std::to_wstring(ok)+L" original values restored";
+            if(!left.empty())r.baselineReport=std::to_wstring(left.size())+L" values could not be restored yet:\n\n"+last;
             r.needsAdmin=!left.empty()&&last.find(L"administrator")!=std::wstring::npos;
         });
+        },L"Cancel",3,IcUndo);
         return;
     }
     if (action == 12) {
@@ -1475,6 +1641,13 @@ std::unique_ptr<Bitmap> loadLight(HINSTANCE instance,int id){
         g.DrawImage(&original,Rect(0,0,640,640),0,0,original.GetWidth(),original.GetHeight(),UnitPixel,&attributes);
     }}stream->Release();return result;
 }
+void drawFaded(Graphics &g,Bitmap *image,const RectF &dst,float sx,float sy,float sw,float sh,float a){
+    if(a>=.999f){g.DrawImage(image,dst,sx,sy,sw,sh,UnitPixel);return;}
+    if(a<=.001f)return;
+    ColorMatrix m={{{1,0,0,0,0},{0,1,0,0,0},{0,0,1,0,0},{0,0,0,a,0},{0,0,0,0,1}}};
+    ImageAttributes at;at.SetColorMatrix(&m);
+    g.DrawImage(image,dst,sx,sy,sw,sh,UnitPixel,&at);
+}
 void prepareListCache() {
     if (!listVisible || selected < 0) return;
     int w = std::max(1, int(std::ceil(LIST_W * scale)));
@@ -1500,14 +1673,25 @@ void drawScrollingList(Graphics &g) {
     g.SetClip(RectF(LIST_X+2,ROWS_Y,LIST_W-4,ROWS_H),CombineModeIntersect);
     g.SetInterpolationMode(InterpolationModeNearestNeighbor);
     float offset=std::round(listScroll.position*scale)/scale;
-    g.DrawImage(listSurface.image.get(),RectF(LIST_X,ROWS_Y,listSurface.width/scale,ROWS_H),
-                0.0f,offset*scale,float(listSurface.width),ROWS_H*scale,UnitPixel);
     int first=std::max(0,int(offset/ROW_H)),last=std::min(pageItemCount,int(std::ceil((offset+ROWS_H)/ROW_H)));
+    bool intro=introStart&&!reduceMotion&&appear(4+(last-first))<1;
+    if(!intro)
+        g.DrawImage(listSurface.image.get(),RectF(LIST_X,ROWS_Y,listSurface.width/scale,ROWS_H),
+                    0.0f,offset*scale,float(listSurface.width),ROWS_H*scale,UnitPixel);
     for(int i=first;i<last;++i){
         auto t=findTweak(shownIds[i]);if(!t)continue;
-        if(t->id==inspectedTweak||t->id==hoveredTweak||(keyboardFocus==listHitStart+i)){
-            rect(g,ROW_X-2,ROWS_Y+i*ROW_H-offset,ROW_W-8,ROW_H,card,0);
-            controlRow(g,*t,ROWS_Y+i*ROW_H-offset);
+        float a=intro?appear(4+i-first):1;
+        float rowY=ROWS_Y+i*ROW_H-offset;
+        if(intro)drawFaded(g,listSurface.image.get(),RectF(LIST_X,rowY+(1-a)*14,listSurface.width/scale,ROW_H),
+                           0.0f,i*ROW_H*scale,float(listSurface.width),ROW_H*scale,a);
+        bool flash=t->id==recentId&&recentStart&&uiNow()-recentStart<1100;
+        if(t->id==inspectedTweak||t->id==hoveredTweak||(keyboardFocus==listHitStart+i)||flash){
+            float saved=gAlpha;gAlpha=a;
+            auto st=g.Save();g.TranslateTransform(0,(1-a)*14);
+            rect(g,ROW_X-2,rowY,ROW_W-8,ROW_H,card,0);
+            if(flash){float f=1-float(uiNow()-recentStart)/1100;glow(g,ROW_X+ROW_W-62,rowY+36,220,90,Color(BYTE(110*f),122,214,160));}
+            controlRow(g,*t,rowY);
+            g.Restore(st);gAlpha=saved;
         }
     }
     if(listScroll.limit>0){
@@ -1529,18 +1713,19 @@ void prepareDetailCache(){
 void drawDetail(Graphics&g){
     if(!listVisible||busy||!detailSurface.image)return;
     auto saved=g.Save();g.SetClip(RectF(DC_X,DC_Y,DC_W,DC_H),CombineModeIntersect);
-    g.DrawImage(detailSurface.image.get(),RectF(DC_X,DC_Y,detailSurface.width/scale,DC_H),0.0f,
-        std::round(detailScroll.position*scale),float(detailSurface.width),DC_H*scale,UnitPixel);
+    float a=std::min(appear(3),lt::easeOut(progress(detailSwitch,220)));
+    drawFaded(g,detailSurface.image.get(),RectF(DC_X,DC_Y+(1-a)*10,detailSurface.width/scale,DC_H),0.0f,
+        std::round(detailScroll.position*scale),float(detailSurface.width),DC_H*scale,a);
     if(detailLimit>0){float thumb=std::max(28.0f,DC_H*DC_H/detailContentHeight);
         rect(g,DC_X+DC_W-5,DC_Y,3,DC_H,divider,1.5f);
         rect(g,DC_X+DC_W-5,DC_Y+(DC_H-thumb)*detailScroll.position/detailLimit,3,thumb,draggingDetail?purple:dim,1.5f);}
     g.Restore(saved);
 }
 void drawMotion(Graphics &g) {
-    drawScrollingList(g);
-    drawDetail(g);
+    if (!modal.open) { drawScrollingList(g); drawDetail(g); }
     if (busy) spinner(g);
-    else if (logged && !recovery && selected < 0) drawActivity(g);
+    else if (logged && !recovery && selected < 0 && !modal.open) drawActivity(g);
+    drawToast(g);
 }
 
 void paint(HWND hwnd) {
@@ -1590,6 +1775,7 @@ void paint(HWND hwnd) {
                 text(g, notice, kLeft, 770, kWidth, 22, 12.5f, dim, false, 4|16);
             }
             if (busy) busyOverlay(g);
+            else drawModal(g);
             if (keyboardFocus >= 0 && keyboardFocus < (int)hits.size()) {
                 auto &focus = hits[keyboardFocus];
                 if (focus.action >= 0) outlineRect(g, focus.r.X + 1, focus.r.Y + 1, focus.r.Width - 2, focus.r.Height - 2, purple, 2, 10);
@@ -1673,7 +1859,7 @@ LRESULT CALLBACK proc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
         SendMessageW(keyEdit, EM_SETCUEBANNER, 0, (LPARAM)L"Paste your license key");
         SendMessageW(keyEdit, EM_SETLIMITTEXT, 180, 0);
         SetWindowSubclass(keyEdit, editProc, 1, 0);
-        try { auto key = loadKey(); SetWindowTextW(keyEdit, key.c_str()); } catch (...) {}
+        try { if (!license || !license->polar()) { auto key = loadKey(); SetWindowTextW(keyEdit, key.c_str()); } } catch (...) {}
         animationTimer(hwnd);
         SetFocus(keyEdit);
         return 0;
@@ -1730,12 +1916,14 @@ LRESULT CALLBACK proc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             if(listVisible&&!busy&&detailScroll.advance(uiNow()))invalidateRegion(hwnd,RectF(DC_X,DC_Y,DC_W,DC_H));
             if (listVisible && !busy && listScroll.advance(uiNow())) { updateListHits(); invalidateList(hwnd); }
             tick = (uiNow() - animationStart) / 1000.0f;
+            if (!reduceMotion && sceneAnimating()) sceneDirty = true;
+            else if (introStart && uiNow() - introStart >= 1400 && !sceneDirty) { introStart = 0; sceneDirty = true; }
             hoverAmount=hoverStart?std::min(1.0f,float(uiNow()-hoverStart)/150):1;
             if(hoverAmount>=1&&hoverStart){hoverStart=0;refresh(hwnd);}
             invalidateAnimation(hwnd);
             if (hoverAmount < .005f && hover < 0) { hoverAmount = 0; animatedHover = -1; }
             if (hoverAmount > .995f) hoverAmount = 1;
-            if(!reduceMotion&&!listScroll.moving()&&!detailScroll.moving()&&!hoverStart&&!transitionStart)InvalidateRect(hwnd,nullptr,FALSE);
+            if(sceneDirty||frameAnimating()||(!reduceMotion&&!listScroll.moving()&&!detailScroll.moving()&&!hoverStart&&!transitionStart))InvalidateRect(hwnd,nullptr,FALSE);
             animationTimer(hwnd);
         }
         return 0;
@@ -1782,7 +1970,7 @@ LRESULT CALLBACK proc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
     case WM_LBUTTONDOWN: {
         SetFocus(hwnd);
         float x=(GET_X_LPARAM(l)-offsetX)/scale,y=(GET_Y_LPARAM(l)-offsetY)/scale;
-        if (listVisible && !busy) {
+        if (listVisible && !busy && !modal.open) {
             if(detailLimit>0&&RectF(DC_X+DC_W-14,DC_Y,16,DC_H).Contains(x,y)){
                 float thumb=std::max(28.0f,DC_H*DC_H/detailContentHeight),top=DC_Y+(DC_H-thumb)*detailScroll.position/detailLimit;
                 detailGrab=y>=top&&y<=top+thumb?y-top:thumb/2;
@@ -1825,6 +2013,7 @@ LRESULT CALLBACK proc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
         refresh(hwnd);return 0;
     }
     case WM_MOUSEWHEEL: {
+        if (modal.open) return 0;
         POINT mouse{GET_X_LPARAM(l),GET_Y_LPARAM(l)};ScreenToClient(hwnd,&mouse);
         float mx=(mouse.x-offsetX)/scale,my=(mouse.y-offsetY)/scale;
         if(!busy&&listVisible&&RectF(DET_X,DET_Y,DET_W,DET_H).Contains(mx,my)){
@@ -1863,6 +2052,10 @@ LRESULT CALLBACK proc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
     case WM_SYSCHAR: if(w==VK_RETURN)return 0; break;
     case WM_SYSKEYDOWN: if(w==VK_RETURN){if(!(l&(1LL<<30)))doAction(35,-1);return 0;} break;
     case WM_KEYDOWN:
+        if(modal.open&&!busy){
+            if(w==VK_ESCAPE){closeModal(false);return 0;}
+            if(w==VK_RETURN){sound(lt::Cue::Click);closeModal(true);return 0;}
+        }
         if(w==VK_F11||(w==VK_ESCAPE&&fullScreen)){if(!(l&(1LL<<30)))doAction(35,-1);return 0;}
         if (listVisible && !busy && (w == VK_NEXT || w == VK_PRIOR || w == VK_HOME || w == VK_END)) {
             if(detailFocus||(keyboardFocus>=0&&keyboardFocus<(int)hits.size()&&hits[keyboardFocus].action==36)){
@@ -1914,8 +2107,7 @@ LRESULT CALLBACK proc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
         listCacheDirty=detailCacheDirty=true;
         animationTimer(hwnd);
         positionEdit();
-        if(r->op!=1&&r->op!=6)sound(r->success?lt::Cue::Complete:lt::Cue::Error);
-        if(!r->success&&r->op==1)sound(lt::Cue::Error);
+        if(r->op!=6)sound(r->success?lt::Cue::Complete:lt::Cue::Error);
         bool askAdmin=false;
         if (r->success) {
             if (r->op == 1) {
@@ -1923,43 +2115,61 @@ LRESULT CALLBACK proc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 selected = -1;
                 preview = false;
                 freeMode=false;keyError=false;
+                beginTransition();
                 positionEdit();
-                notice = L"Pro activated. Matching every tweak to your hardware…";
+                notice = L"Pro is active on this PC. Matching every tweak to your hardware…";
+                toast(L"Welcome to LunarTweaks Pro",1);
                 scan();
+            } else if (r->op == 8) {
+                doAction(70, -1);
+                toast(L"Signed out · this PC's activation is free again",1);
             } else {
                 if (!r->states.empty()) {
                     pc = r->info;
                     states = r->states;
-                    scanDone = true;
                     if (r->op == 2) {
                         SYSTEMTIME now;
                         GetLocalTime(&now);
                         wchar_t stamp[32];
                         swprintf_s(stamp, L"today %02u:%02u", now.wHour, now.wMinute);
                         lastScan = stamp;
+                        if (!scanDone || selected < 0) beginTransition();
                     }
+                    scanDone = true;
                 }
                 if (r->op == 2) { baselineReport = r->baselineReport; baselineSummary = r->baselineSummary; }
                 notice = r->message;
-                if (r->op == 5) {
+                if (r->op == 2) {
+                    int ready=0;for(const auto&t:catalog())if(!t.legacy&&automatic(t)&&t.tier<=tier()&&states[t.id]==1)++ready;
+                    toast(L"Scan complete · "+std::to_wstring(ready)+L" tweaks ready for this PC",1);
+                } else if (r->op == 5) {
                     notice=L"Ping test complete.";
-                    MessageBoxW(hwnd, r->message.c_str(), L"LunarTweaks · Ping test", MB_OK | MB_ICONINFORMATION);
+                    infoModal(L"Ping test results", r->message, 0, IcWifi);
+                } else if (r->op == 3 || r->op == 4 || r->op == 7) {
+                    if (r->tweakId) { recentId = r->tweakId; recentStart = reduceMotion ? 0 : uiNow(); }
+                    if (!r->baselineReport.empty()) {
+                        askAdmin = r->needsAdmin;
+                        if (askAdmin && !pc.elevated)
+                            openModal(r->message + L", some need admin", r->baselineReport + L"\nRestart LunarTweaks as administrator to apply the rest.",
+                                      L"Restart as admin", []{ relaunchElevated(); }, L"Later", 3, IcShield);
+                        else infoModal(r->message, r->baselineReport, 3, IcShield);
+                        askAdmin = false;
+                    } else toast(r->message, 1);
                 }
-                if (r->op == 7 && !r->baselineReport.empty()) {
-                    MessageBoxW(hwnd, r->baselineReport.c_str(), L"LunarTweaks", MB_OK | MB_ICONINFORMATION);
-                    askAdmin = r->needsAdmin;
-                }
-                if (r->op == 4) askAdmin = r->needsAdmin;
             }
         } else {
             notice = r->message;
-            if(r->op==1)keyError=true;
-            else{MessageBoxW(hwnd, r->message.c_str(), L"LunarTweaks", MB_OK | MB_ICONINFORMATION);askAdmin=r->needsAdmin;}
+            if(r->op==1){
+                keyError=true;
+                if(logged){logged=false;positionEdit();}
+            }
+            else if(r->needsAdmin&&!pc.elevated)
+                openModal(L"Administrator rights needed",r->message+L"\n\nThis tweak changes a system-wide setting. Restart LunarTweaks as administrator to apply it.",
+                          L"Restart as admin",[]{ relaunchElevated(); },L"Later",3,IcShield);
+            else infoModal(L"That didn't work", r->message, 2, IcShield);
         }
         refresh(hwnd);
-        if(askAdmin&&!pc.elevated&&MessageBoxW(hwnd,L"Most performance tweaks change system-wide settings, which needs administrator rights.\n\nRestart LunarTweaks as administrator now?",
-                                               L"Administrator needed",MB_YESNO|MB_ICONQUESTION)==IDYES)
-            relaunchElevated();
+        (void)askAdmin;
         return 0;
     }
     case WM_CLOSE:
@@ -2014,7 +2224,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR command, int show) {
         }catch(...){preferencesPath.clear();}
         loadBrandLogo(instance);
         violetLight=loadLight(instance,6);blueLight=loadLight(instance,7);
-        license = std::make_unique<LicenseClient>();
+        license = std::make_unique<Licensing>();
         pc.elevated = processElevated();
         WNDCLASSEXW wc{};
         wc.cbSize = sizeof(wc);
@@ -2040,7 +2250,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR command, int show) {
         std::wstring args = command;
         if(args.find(L"--free")!=std::wstring::npos)doAction(30,-1);
         else if (args.find(L"--preview") != std::wstring::npos) doAction(2, -1);
+        else if (license->polar() && license->remembered()) resumeLicense();
         else if (args.find(L"--activate") != std::wstring::npos && GetWindowTextLengthW(keyEdit) > 0) login();
+        else { beginTransition(); refresh(hwnd); }
         MSG msg;
         while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
             TranslateMessage(&msg);

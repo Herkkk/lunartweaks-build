@@ -5,39 +5,55 @@
 #include <vector>
 namespace lt {
 enum class Cue { Click, Complete, Error };
-// Original, low-amplitude cues. Finite PCM buffers; no files or background loops.
+// Soft, musical interface cues synthesised in memory (no files, no loops).
+//  Click    — a 28 ms rounded "tick": pitched sine blip with a fast exponential decay.
+//  Complete — a two-note glass chime (E6 → B6) with gentle bell partials.
+//  Error    — two soft, low, descending notes (A4 → F4). Never harsh.
+// All cues start and end on silence and stay well below full scale.
+constexpr unsigned kCueRate = 44100;
 inline std::vector<unsigned char> cueWave(Cue cue) {
-    constexpr unsigned rate=22050;
-    unsigned count=cue==Cue::Click?792:cue==Cue::Complete?3969:2205;
-    std::vector<unsigned char> out(44+count*2);
-    auto word=[&](unsigned at,unsigned value,unsigned bytes){for(unsigned i=0;i<bytes;++i)out[at+i]=static_cast<unsigned char>(value>>(8*i));};
-    auto tag=[&](unsigned at,const char*s){for(int i=0;i<4;++i)out[at+i]=s[i];};
-    tag(0,"RIFF");word(4,out.size()-8,4);tag(8,"WAVE");tag(12,"fmt ");word(16,16,4);
-    word(20,1,2);word(22,1,2);word(24,rate,4);word(28,rate*2,4);word(32,2,2);word(34,16,2);tag(36,"data");word(40,count*2,4);
-    uint32_t noise=0x4c554e41;double filtered=0;
-    for(unsigned i=0;i<count;++i){
-        double t=double(i)/rate,u=double(i)/(count-1);
-        noise^=noise<<13;noise^=noise>>17;noise^=noise<<5;
-        double random=(double(noise)/UINT32_MAX)*2-1;
-        filtered+=.32*(random-filtered);
-        // Brief textured impact and a damped low body, with no sustained click tone.
-        double envelope=std::min(1.0,t/.0015)*std::pow(1-u,2);
-        double sample;
-        if(cue==Cue::Click){
-            sample=.65*filtered*std::exp(-t*120)+.35*std::sin(6.283185307179586*(210*t-800*t*t))*std::exp(-t*90);
-            sample=std::clamp(sample*2.2,-1.0,1.0);
-        }else if(cue==Cue::Complete){
-            envelope=std::min(1.0,t/.006)*std::pow(1-u,2);
-            sample=.55*std::sin(6.283185307179586*520*t)+.25*std::sin(6.283185307179586*780*t);
-        }else sample=.7*std::sin(6.283185307179586*260*t)*std::exp(-t*12);
-        int16_t value=static_cast<int16_t>(sample*envelope*1638);
-        word(44+i*2,static_cast<uint16_t>(value),2);
+    constexpr double tau = 6.283185307179586;
+    const double seconds = cue == Cue::Click ? .028 : cue == Cue::Complete ? .52 : .36;
+    const unsigned count = unsigned(seconds * kCueRate);
+    std::vector<unsigned char> out(44 + count * 2);
+    auto word = [&](unsigned at, unsigned value, unsigned bytes) { for (unsigned i = 0; i < bytes; ++i) out[at + i] = static_cast<unsigned char>(value >> (8 * i)); };
+    auto tag = [&](unsigned at, const char *s) { for (int i = 0; i < 4; ++i) out[at + i] = s[i]; };
+    tag(0, "RIFF"); word(4, unsigned(out.size() - 8), 4); tag(8, "WAVE"); tag(12, "fmt "); word(16, 16, 4);
+    word(20, 1, 2); word(22, 1, 2); word(24, kCueRate, 4); word(28, kCueRate * 2, 4); word(32, 2, 2); word(34, 16, 2);
+    tag(36, "data"); word(40, count * 2, 4);
+    // A note with a smooth raised-cosine attack and exponential decay, plus soft bell partials.
+    auto note = [&](double t, double start, double freq, double decay, double attack) {
+        double x = t - start;
+        if (x < 0) return 0.0;
+        double env = (x < attack ? .5 - .5 * std::cos(3.141592653589793 * x / attack) : 1.0) * std::exp(-x * decay);
+        return env * (std::sin(tau * freq * x) + .22 * std::sin(tau * freq * 2.0 * x) * std::exp(-x * decay * 1.6) +
+                      .08 * std::sin(tau * freq * 3.01 * x) * std::exp(-x * decay * 2.4));
+    };
+    std::vector<double> samples(count);
+    double peak = 1e-9;
+    for (unsigned i = 0; i < count; ++i) {
+        double t = double(i) / kCueRate, s = 0;
+        if (cue == Cue::Click) {
+            // Pitch glides 1500 → 1100 Hz for a rounded, non-mechanical tick.
+            double phase = tau * (1500 * t - 0.5 * 400 / .028 * t * t);
+            double env = (t < .0015 ? .5 - .5 * std::cos(3.141592653589793 * t / .0015) : 1.0) * std::exp(-t * 180);
+            s = env * std::sin(phase);
+        } else if (cue == Cue::Complete) {
+            s = .62 * note(t, 0.0, 1318.5, 9.0, .004) + .55 * note(t, .085, 1975.5, 7.5, .004);
+        } else {
+            s = .65 * note(t, 0.0, 440.0, 11.0, .008) + .6 * note(t, .11, 349.2, 10.0, .008);
+        }
+        samples[i] = s;
+        peak = std::max(peak, std::abs(s));
     }
-    if(cue==Cue::Click){
-        int peak=1;for(unsigned i=0;i<count;++i){int v=int16_t(out[44+i*2]|(unsigned(out[45+i*2])<<8));peak=std::max(peak,std::abs(v));}
-        for(unsigned i=0;i<count;++i){int16_t v=int16_t(out[44+i*2]|(unsigned(out[45+i*2])<<8));
-            word(44+i*2,static_cast<uint16_t>(int16_t(int(v)*1450/peak)),2);}
+    // Loudness: clicks are very quiet, the chime a little louder, errors in between.
+    const double level = cue == Cue::Click ? 2600 : cue == Cue::Complete ? 4200 : 3400;
+    for (unsigned i = 0; i < count; ++i) {
+        double fade = i + 1 >= count ? 0.0 : std::min(1.0, double(count - 1 - i) / (kCueRate * .012));
+        double head = i == 0 ? 0.0 : 1.0;
+        auto value = static_cast<int16_t>(std::lround(samples[i] / peak * level * fade * head));
+        word(44 + i * 2, static_cast<uint16_t>(value), 2);
     }
     return out;
 }
-}
+} // namespace lt
