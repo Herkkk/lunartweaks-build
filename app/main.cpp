@@ -384,7 +384,7 @@ void icon(Graphics &g,int which,float x,float y,Color c,float size=24){
         g.FillEllipse(&fill,14.6f,10.4f,2.6f,2.6f);g.FillEllipse(&fill,17.2f,13.2f,2.6f,2.6f);break;
     case IcDrive:
         outlineRect(g,3,4,18,7,c,1.8f,2);outlineRect(g,3,13,18,7,c,1.8f,2);
-        g.FillEllipse(&fill,15.5f,6.5f,2,2);g.FillEllipse(&fill,15.5f,15.5f,2,2);break;
+        g.FillEllipse(&fill,15.5f,6.5f,2.0f,2.0f);g.FillEllipse(&fill,15.5f,15.5f,2.0f,2.0f);break;
     case IcWifi:
         for(float r:{13.0f,8.5f,4.0f})g.DrawArc(&p,12-r,19.5f-r,r*2,r*2,-135.0f,90.0f);
         g.FillEllipse(&fill,10.8f,18.3f,2.4f,2.4f);break;
