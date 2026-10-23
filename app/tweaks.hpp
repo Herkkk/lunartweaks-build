@@ -11,7 +11,7 @@
 #include <winioctl.h>
 #include <setupapi.h>
 namespace lt {
-enum class Kind { SpiBool, SpiUi, SpiPv, Mouse, Animation, Power, Guide, Maintenance, Ping, AdaptivePower, Registry };
+enum class Kind { SpiBool, SpiUi, SpiPv, Mouse, Animation, Power, Guide, Maintenance, Ping, AdaptivePower, Registry, Bundle };
 struct SystemInfo;
 using Planner = reg::Plan (*)(const SystemInfo &);
 struct Tweak {
@@ -28,7 +28,11 @@ struct Tweak {
     bool restart = false;    // takes full effect after a restart
     bool recommended = true; // part of the one-click "Apply recommended"
     bool legacy = false;     // kept only so older backups stay restorable
+    bool hidden = false;     // part of a bundle; applied and restored through it
+    const int *members = nullptr; // Kind::Bundle: the tweaks applied together
+    int memberCount = 0;
 };
+const Tweak *findTweak(int id);
 struct SystemInfo {
     std::wstring cpu, gpu, os, network, storage;
     std::wstring gpuInstance, netInterface;
@@ -202,6 +206,11 @@ inline std::wstring backupPath(const Tweak &t) {
     return dataDir() + L"\\backups\\" + std::to_wstring(t.id) + L".ltb";
 }
 inline bool hasBackup(const Tweak &t) {
+    if (t.kind == Kind::Bundle) {
+        for (int i = 0; i < t.memberCount; ++i)
+            if (auto m = findTweak(t.members[i]); m && m->kind != Kind::Bundle && hasBackup(*m)) return true;
+        return false;
+    }
     if (t.kind == Kind::Registry) return reg::hasBackup(t.id);
     return t.kind==Kind::AdaptivePower ? adaptive::has(t.id) : std::filesystem::exists(backupPath(t));
 }
@@ -320,6 +329,19 @@ inline reg::Plan planFor(const Tweak &t, const SystemInfo &pc) {
     return t.plan(pc);
 }
 inline void apply(const Tweak &t, const SystemInfo &pc) {
+    if (t.kind == Kind::Bundle) {
+        // Apply every part this PC supports; each part keeps its own original value for Undo.
+        int done = 0;
+        std::string firstError;
+        for (int i = 0; i < t.memberCount; ++i) {
+            auto m = findTweak(t.members[i]);
+            if (!m || m->kind == Kind::Bundle) continue;
+            try { apply(*m, pc); ++done; }
+            catch (const std::exception &e) { if (firstError.empty()) firstError = e.what(); }
+        }
+        if (!done) throw std::runtime_error(firstError.empty() ? "Nothing could be changed on this PC" : firstError);
+        return;
+    }
     if (t.kind == Kind::Registry) { reg::apply(t.id, planFor(t, pc)); return; }
     if(t.kind==Kind::AdaptivePower){adaptive::apply(t.id,t.value,t.name);return;}
     auto old = readState(t);
@@ -341,6 +363,16 @@ inline void apply(const Tweak &t, const SystemInfo &pc) {
             "Windows did not retain the requested value; the original backup is available");
 }
 inline void restore(const Tweak &t) {
+    if (t.kind == Kind::Bundle) {
+        std::string firstError;
+        for (int i = t.memberCount; i-- > 0;) {
+            auto m = findTweak(t.members[i]);
+            if (!m || m->kind == Kind::Bundle || !hasBackup(*m)) continue;
+            try { restore(*m); } catch (const std::exception &e) { if (firstError.empty()) firstError = e.what(); }
+        }
+        if (!firstError.empty()) throw std::runtime_error(firstError);
+        return;
+    }
     if (t.kind == Kind::Registry) { reg::restore(t.id); return; }
     if(t.kind==Kind::AdaptivePower){adaptive::restore(t.id);return;}
     auto s = savedState(t);

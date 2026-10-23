@@ -374,7 +374,7 @@ struct Reveal{
 float hoverEase(int me){return hover==me?(reduceMotion?1:lt::easeOut(hoverAmount)):0;}
 float ringShown(){return ringFrom+(ringTo-ringFrom)*lt::easeOut(progress(ringStart,900));}
 int stateOf(int id){return id>=0&&id<(int)states.size()?states[id]:0;}
-bool visibleTweak(const Tweak &t){return !t.legacy;}
+bool visibleTweak(const Tweak &t){return !t.legacy&&!t.hidden;}
 std::wstring tierName(int v) { return v == 2 ? L"Pro" : L"Free"; }
 struct Counts{int ready=0,active=0,unavailable=0,locked=0,lockedMatched=0,total=0,recommended=0,all=0;};
 Counts countFor(int category){
@@ -934,7 +934,7 @@ void proCard(Graphics &g){
     }else{
         card2(g,x,y,w,h,false,18);
         iconTile(g,IcUndo,x+20,y+26,44);
-        int saved=0;if(!preview)for(const auto&t:catalog())if(automatic(t)&&hasBackup(t))++saved;
+        int saved=0;if(!preview)for(const auto&t:catalog())if(t.kind!=Kind::Bundle&&automatic(t)&&hasBackup(t))++saved;
         text(g,L"Undo & backups",x+80,y+22,200,22,16,white,true,4|8);
         text(g,std::to_wstring(saved)+L" original values saved on this PC",x+80,y+46,w-100,20,12.5f,muted,false,4);
         quietButton(g,L"Open",x+w-84,y+30,64,36,6);
@@ -994,7 +994,7 @@ void recoveryCard(Graphics &g,const Tweak &t,float x,float y){
     button(g,L"Restore",x+w-138,y+64,118,34,11,t.id,0,preview,IcUndo);
 }
 void recoveryPage(Graphics &g){
-    std::vector<const Tweak*>items;if(!preview)for(const auto&t:catalog())if(automatic(t)&&hasBackup(t))items.push_back(&t);
+    std::vector<const Tweak*>items;if(!preview)for(const auto&t:catalog())if(!t.hidden&&automatic(t)&&hasBackup(t))items.push_back(&t);
     pageItemCount=(int)items.size();scrollRow=std::clamp(scrollRow,0,maxScrollRow());
     Reveal titleReveal(g,0);
     pageTitle(g,L"Undo & backups",items.empty()?L"Nothing to restore yet. Originals are saved here automatically before every change.":
@@ -1141,6 +1141,7 @@ std::vector<int> detect(SystemInfo &sys) {
     for (const auto &t : catalog()) {
         if (!automatic(t)) continue;
         if (t.legacy) { out[t.id] = hasBackup(t) ? 1 : 3; continue; }
+        if (t.kind == Kind::Bundle) continue; // Resolved from its parts below.
         try {
             if (t.kind == Kind::Registry) {
                 auto plan = planFor(t, sys);
@@ -1174,6 +1175,24 @@ std::vector<int> detect(SystemInfo &sys) {
             if(t.kind==Kind::AdaptivePower||t.kind==Kind::Registry)sys.tailoring[t.id]=L"Not available on this PC\n"+wide(e.what());
             out[t.id] = 3;
         }
+    }
+    // A bundle is active when every supported part is active, and ready while any part is ready.
+    for (const auto &t : catalog()) {
+        if (t.kind != Kind::Bundle) continue;
+        int ready = 0, active = 0;
+        std::wstring parts;
+        for (int i = 0; i < t.memberCount; ++i) {
+            auto m = findTweak(t.members[i]);
+            if (!m) continue;
+            int st = out[m->id];
+            if (st == 1) ++ready;
+            if (st == 2) ++active;
+            parts += (st == 2 ? L"\u2713  " : st == 1 ? L"\u2192  " : L"\u2013  ") + std::wstring(m->name) +
+                     (st == 2 ? L" (already off)" : st == 1 ? L" (will be turned off)" : L" (not on this PC)") + L"\n";
+        }
+        out[t.id] = !sys.windowsSupported ? 3 : ready ? 1 : active ? 2 : 3;
+        sys.headline[t.id] = ready ? std::to_wstring(ready) + L" animations still on" : L"All animations are already off";
+        sys.tailoring[t.id] = L"On this PC\n" + parts + L"\nThe taskbar part finishes after you sign out or restart Explorer.";
     }
     return out;
 }
@@ -1216,7 +1235,7 @@ void scan() {
         PostMessageW(window, WM_SCAN_PROGRESS, 0, 1);
         r.states = detect(r.info);
         if(freeMode){
-            int matched=0;for(const auto&t:catalog())if(!t.legacy&&t.tier==2&&r.states[t.id]==1)++matched;
+            int matched=0;for(const auto&t:catalog())if(!t.legacy&&!t.hidden&&t.tier==2&&r.states[t.id]==1)++matched;
             r.message=L"Free scan complete · Pro matched "+std::to_wstring(matched)+L" extra performance tweaks to this PC.";
             return;
         }
@@ -1338,7 +1357,7 @@ std::wstring confirmText(const Tweak &t){
 std::vector<int> batchIds(int category){
     std::vector<int> ids;
     for(const auto&t:catalog()){
-        if(t.legacy||!automatic(t)||t.tier>tier()||!t.recommended||stateOf(t.id)!=1)continue;
+        if(t.legacy||t.hidden||!automatic(t)||t.tier>tier()||!t.recommended||stateOf(t.id)!=1)continue;
         if(category>=0&&t.category!=category)continue;
         if(t.id==41&&tier()==2)continue; // The Lunar Performance plan replaces the stock plan.
         ids.push_back(t.id);
@@ -1568,7 +1587,7 @@ void doAction(int action, int index) {
         openModal(L"Restore everything?",L"Every saved original value is put back. Power plans are restored newest first, and some values finish after a restart.",
                   L"Restore everything",[]{
         startWork(4,[](Result &r){
-            std::vector<const Tweak*> left;for(const auto&t:catalog())if(automatic(t)&&hasBackup(t))left.push_back(&t);
+            std::vector<const Tweak*> left;for(const auto&t:catalog())if(t.kind!=Kind::Bundle&&automatic(t)&&hasBackup(t))left.push_back(&t);
             int ok=0;std::wstring last;
             for(int pass=0;pass<4&&!left.empty();++pass){
                 std::vector<const Tweak*> next;
@@ -2140,7 +2159,7 @@ LRESULT CALLBACK proc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 if (r->op == 2) { baselineReport = r->baselineReport; baselineSummary = r->baselineSummary; }
                 notice = r->message;
                 if (r->op == 2) {
-                    int ready=0;for(const auto&t:catalog())if(!t.legacy&&automatic(t)&&t.tier<=tier()&&states[t.id]==1)++ready;
+                    int ready=0;for(const auto&t:catalog())if(visibleTweak(t)&&automatic(t)&&t.tier<=tier()&&states[t.id]==1)++ready;
                     toast(L"Scan complete · "+std::to_wstring(ready)+L" tweaks ready for this PC",1);
                 } else if (r->op == 5) {
                     notice=L"Ping test complete.";

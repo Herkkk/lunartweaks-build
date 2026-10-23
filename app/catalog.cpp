@@ -34,6 +34,9 @@ Plan service(const wchar_t *name, DWORD start) {
 Plan instantMenus(const SystemInfo &) {
     return {{string(User, L"Control Panel\\Desktop", L"MenuShowDelay", L"0")}, L"Menus open instantly", L""};
 }
+Plan taskbarAnimations(const SystemInfo &) {
+    return {{dword(User, L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced", L"TaskbarAnimations", 0)}, L"", L""};
+}
 Plan transparencyOff(const SystemInfo &) {
     return {{dword(User, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize", L"EnableTransparency", 0)},
             L"Solid taskbar and Start", L""};
@@ -291,6 +294,11 @@ Tweak power(int id, int cat, const wchar_t *name, const wchar_t *summary, const 
     t.legacy = legacy;
     return t;
 }
+Tweak part(int id, const wchar_t *name, Kind kind, UINT get, UINT set, DWORD value) {
+    Tweak t = spi(id, 0, 0, name, L"", L"", kind, get, set, value, 0, false);
+    t.hidden = true;
+    return t;
+}
 Tweak legacySpi(int id, const wchar_t *name, Kind kind, UINT get, UINT set, DWORD value) {
     return spi(id, 0, 0, name, L"Saved by an earlier version", L"Kept so you can restore a value saved by LunarTweaks 1.x.",
                kind, get, set, value, 0, true);
@@ -305,9 +313,19 @@ const std::vector<Tweak> &catalog() {
         v.push_back(make(201, 0, 0, L"Instant menus", L"Remove the 400 ms delay before menus open",
                          L"Windows waits 400 ms before showing cascading menus. Setting the delay to 0 makes every right-click and Start submenu open instantly.",
                          instantMenus, 0));
-        v.push_back(spi(9, 0, 0, L"Window animations off", L"Minimise and restore windows instantly",
-                        L"Turns off the minimise/maximise animation so windows snap immediately. Purely visual, no feature is lost.",
-                        Kind::Animation, SPI_GETANIMATION, SPI_SETANIMATION, 0, 0));
+        {
+            Tweak t{213, 0, 0, L"Animations off",
+                    L"Turns off every Windows animation in one step: windows opening, closing, minimising and maximising, "
+                    L"menu and tooltip fades, drop-down and list animations, and taskbar animations. Windows, menus and the "
+                    L"taskbar react instantly. The taskbar part finishes after you sign out or restart Explorer.",
+                    Kind::Bundle};
+            static const int members[] = {8, 9, 1, 2, 3, 4, 5, 6, 7, 214};
+            t.members = members;
+            t.memberCount = int(sizeof(members) / sizeof(members[0]));
+            t.summary = L"Windows, menus and the taskbar react instantly";
+            t.impact = 1;
+            v.push_back(t);
+        }
         v.push_back(make(202, 0, 0, L"Transparency effects off", L"Solid taskbar, Start and Settings",
                          L"Acrylic blur is re-rendered by the desktop compositor every frame. Solid surfaces free a little GPU time, which matters most on integrated graphics.",
                          transparencyOff, 0));
@@ -420,14 +438,21 @@ const std::vector<Tweak> &catalog() {
                          dnsNegativeCache, 0, true));
 
         // ===== Legacy (hidden): keeps 1.x backups restorable =====
-        v.push_back(legacySpi(1, L"Menu animations", Kind::SpiBool, SPI_GETMENUANIMATION, SPI_SETMENUANIMATION, 0));
-        v.push_back(legacySpi(2, L"Menu fade", Kind::SpiBool, SPI_GETMENUFADE, SPI_SETMENUFADE, 0));
-        v.push_back(legacySpi(3, L"Tooltip animations", Kind::SpiBool, SPI_GETTOOLTIPANIMATION, SPI_SETTOOLTIPANIMATION, 0));
-        v.push_back(legacySpi(4, L"Tooltip fade", Kind::SpiBool, SPI_GETTOOLTIPFADE, SPI_SETTOOLTIPFADE, 0));
-        v.push_back(legacySpi(5, L"Combo-box animation", Kind::SpiBool, SPI_GETCOMBOBOXANIMATION, SPI_SETCOMBOBOXANIMATION, 0));
-        v.push_back(legacySpi(6, L"List-box smooth scrolling", Kind::SpiBool, SPI_GETLISTBOXSMOOTHSCROLLING, SPI_SETLISTBOXSMOOTHSCROLLING, 0));
-        v.push_back(legacySpi(7, L"Selection fade", Kind::SpiBool, SPI_GETSELECTIONFADE, SPI_SETSELECTIONFADE, 0));
-        v.push_back(legacySpi(8, L"Client-area animation", Kind::SpiBool, SPI_GETCLIENTAREAANIMATION, SPI_SETCLIENTAREAANIMATION, 0));
+        // ===== Parts of "Animations off" (applied, detected and restored through the bundle) =====
+        v.push_back(part(8, L"Window open and close animations", Kind::SpiBool, SPI_GETCLIENTAREAANIMATION, SPI_SETCLIENTAREAANIMATION, 0));
+        v.push_back(part(9, L"Minimise and maximise animation", Kind::Animation, SPI_GETANIMATION, SPI_SETANIMATION, 0));
+        v.push_back(part(1, L"Menu animations", Kind::SpiBool, SPI_GETMENUANIMATION, SPI_SETMENUANIMATION, 0));
+        v.push_back(part(2, L"Menu fade", Kind::SpiBool, SPI_GETMENUFADE, SPI_SETMENUFADE, 0));
+        v.push_back(part(3, L"Tooltip animations", Kind::SpiBool, SPI_GETTOOLTIPANIMATION, SPI_SETTOOLTIPANIMATION, 0));
+        v.push_back(part(4, L"Tooltip fade", Kind::SpiBool, SPI_GETTOOLTIPFADE, SPI_SETTOOLTIPFADE, 0));
+        v.push_back(part(5, L"Drop-down animation", Kind::SpiBool, SPI_GETCOMBOBOXANIMATION, SPI_SETCOMBOBOXANIMATION, 0));
+        v.push_back(part(6, L"Smooth list scrolling", Kind::SpiBool, SPI_GETLISTBOXSMOOTHSCROLLING, SPI_SETLISTBOXSMOOTHSCROLLING, 0));
+        v.push_back(part(7, L"Selection fade", Kind::SpiBool, SPI_GETSELECTIONFADE, SPI_SETSELECTIONFADE, 0));
+        {
+            Tweak t = make(214, 0, 0, L"Taskbar animations", L"", L"", taskbarAnimations, 0);
+            t.hidden = true;
+            v.push_back(t);
+        }
         v.push_back(legacySpi(10, L"Drag window outlines", Kind::SpiUi, SPI_GETDRAGFULLWINDOWS, SPI_SETDRAGFULLWINDOWS, 0));
         v.push_back(legacySpi(22, L"Neutral pointer speed", Kind::SpiPv, SPI_GETMOUSESPEED, SPI_SETMOUSESPEED, 10));
         v.push_back(legacySpi(23, L"Pointer trails", Kind::SpiUi, SPI_GETMOUSETRAILS, SPI_SETMOUSETRAILS, 0));
