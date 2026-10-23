@@ -205,8 +205,10 @@ class PolarLicense {
         if (!j.isNull("expires_at")) {
             std::tm tm{};
             auto e = j.str("expires_at");
-            if (sscanf(e.c_str(), "%d-%d-%dT%d:%d:%d", &tm.tm_year, &tm.tm_mon, &tm.tm_mday, &tm.tm_hour, &tm.tm_min, &tm.tm_sec) == 6) {
-                tm.tm_year -= 1900; tm.tm_mon -= 1;
+            auto num = [&](size_t at, size_t n) { int v = 0; for (size_t i = at; i < at + n && i < e.size(); ++i) { if (!isdigit((unsigned char)e[i])) return -1; v = v * 10 + (e[i] - '0'); } return v; };
+            if (e.size() >= 19 && num(0, 4) > 0 && num(5, 2) >= 1 && num(8, 2) >= 1 && num(11, 2) >= 0 && num(14, 2) >= 0 && num(17, 2) >= 0) {
+                tm.tm_year = num(0, 4) - 1900; tm.tm_mon = num(5, 2) - 1; tm.tm_mday = num(8, 2);
+                tm.tm_hour = num(11, 2); tm.tm_min = num(14, 2); tm.tm_sec = num(17, 2);
                 if ((long long)_mkgmtime(&tm) < now()) { tier_ = 0; throw std::runtime_error("This Pro key has expired. Renew it on lunartweaks.se."); }
             }
         }
