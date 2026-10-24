@@ -1,0 +1,20 @@
+LUNARTWEAKS 1.11.0 - FREE + PRO
+
+Extract all files and open LunarTweaks.exe.
+Continue with Free needs no key/server. Activate Pro & scan accepts Pro and
+existing Ultimate keys. Public Pro activation requires the owner's HTTPS
+licensing endpoint in LunarTweaks.ini.
+
+Full screen: button, F11 or Alt+Enter. Escape leaves fullscreen first.
+Sound on/off and Motion on/off are in the title bar. Preferences are saved.
+Short click/completion cues and restrained transitions; no looping ambience.
+
+Free: 20 automatic settings / 60 total entries.
+Pro: 31 automatic settings / 110 total entries, plus the desktop preset.
+Entries include guides/tools. Actual compatibility depends on this PC.
+Review each change; Undo restores saved originals for automatic changes.
+
+This build is unsigned. Windows SmartScreen can show an unrecognized-app
+warning. Publisher signing/reputation is not completed by this update.
+Windows x64 required. Native runtime testing remains outstanding.
+See THIRD-PARTY-NOTICES.txt for bundled font licenses.

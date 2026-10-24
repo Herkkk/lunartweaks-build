@@ -1,0 +1,4 @@
+PASS: registry apply/restore, missing values, rollback, admin denial, first-original retention, tamper detection.
+PASS: all 12 policies, OEM/DC preservation, portable values, capability gates, failure rollback, durable recovery, ordering and tamper detection.
+PASS: cue headers, durations, levels and silent edges.
+status=0
