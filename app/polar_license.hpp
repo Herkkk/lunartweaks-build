@@ -286,30 +286,4 @@ class PolarLicense {
         key_.clear(); activation_.clear(); lastOk_ = 0; lastCheck_ = 0; tier_ = 0;
     }
 };
-// ---- One front for the app: Polar when configured, otherwise the owner's own server -------
-class Licensing {
-    std::unique_ptr<PolarLicense> polar_;
-    std::unique_ptr<LicenseClient> legacy_;
-  public:
-    Licensing() {
-        auto ini = exeDir() + L"\\LunarTweaks.ini";
-        wchar_t org[128]{};
-        GetPrivateProfileStringW(L"Polar", L"OrganizationId", L"", org, 128, ini.c_str());
-        std::wstring id = org;
-        id.erase(std::remove_if(id.begin(), id.end(), [](wchar_t c) { return iswspace(c); }), id.end());
-        if (!id.empty())
-            polar_ = std::make_unique<PolarLicense>(id, GetPrivateProfileIntW(L"Polar", L"Sandbox", 0, ini.c_str()) == 1);
-        else
-            legacy_ = std::make_unique<LicenseClient>();
-    }
-    bool polar() const { return polar_ != nullptr; }
-    bool configured() const { return polar_ ? polar_->configured() : legacy_->configured(); }
-    int tier() const { return polar_ ? polar_->tier() : legacy_->tier(); }
-    void activate(const std::string &key) { if (polar_) polar_->activate(key); else legacy_->activate(key); }
-    int authorize() { return polar_ ? polar_->authorize() : legacy_->authorize(); }
-    bool remembered() { return polar_ ? polar_->remembered() : !loadKey().empty(); }
-    void resume() { if (polar_) polar_->resume(); else { auto k = loadKey(); if (k.empty()) throw std::runtime_error("No saved key"); legacy_->activate(utf8(k)); } }
-    void signOut() { if (polar_) polar_->signOut(); }
-    std::wstring keyLabel() const { return polar_ ? wide(polar_->maskedKey()) : L""; }
-};
 } // namespace lt

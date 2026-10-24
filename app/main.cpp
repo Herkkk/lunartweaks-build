@@ -1,4 +1,4 @@
-#include "polar_license.hpp"
+#include "keyserver_license.hpp"
 #include "entitlements.hpp"
 #include "tweaks.hpp"
 #include "network_probe.hpp"
@@ -627,7 +627,7 @@ void loginPage(Graphics &g){
     }
     quietButton(g,L"Local recovery",px+300,py+580,118,32,12);
     quietButton(g,L"Preview",px+424,py+580,92,32,2);
-    text(g,license&&license->polar()?L"Bought Pro? Your key is in the Polar receipt email. Free works offline.":L"Free works offline. Pro verifies your key once, then binds it to this PC.",px+32,py+626,484,22,12,dim);
+    text(g,license&&license->polar()?L"Bought Pro? Your key is on your receipt page and in your email.":L"Free works offline. Pro verifies your key once, then binds it to this PC.",px+32,py+626,484,22,12,dim);
 }
 
 void sidebar(Graphics &g) {
@@ -1300,7 +1300,7 @@ void login() {
         refresh(window);
         return;
     }
-    bool polar = license->polar();
+    bool polar = license->polar(); // online key system (key server or Polar)
     wchar_t key[200];
     GetWindowTextW(keyEdit, key, 200);
     std::wstring input = key;
@@ -1308,7 +1308,7 @@ void login() {
     if (!polar) for (auto &c : input) c = towupper(c);
     if (input.empty()) {
         keyError=true;
-        notice = polar ? L"Paste the Pro key from your Polar receipt email, or continue with Free." : L"Paste your Pro license key, or continue with Free.";
+        notice = polar ? L"Paste the Pro key from your receipt, or continue with Free." : L"Paste your Pro license key, or continue with Free.";
         refresh(window);
         return;
     }

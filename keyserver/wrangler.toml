@@ -1,0 +1,20 @@
+# LunarTweaks key server (Cloudflare Worker + SQLite Durable Object).
+name = "lunartweaks-keys"
+main = "src/worker.js"
+compatibility_date = "2025-09-01"
+workers_dev = true
+
+[vars]
+SITE_URL = "https://lunartweaks.se"
+MAX_DEVICES = "2"
+
+[[durable_objects.bindings]]
+name = "LICENSES"
+class_name = "Licenses"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Licenses"]
+
+# The deploy workflow adds this automatically when the KEYS_DOMAIN variable is set:
+# routes = [{ pattern = "keys.lunartweaks.se", custom_domain = true }]
